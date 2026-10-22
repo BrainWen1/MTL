@@ -39,6 +39,10 @@ type Options struct {
 	RetryDelay time.Duration
 	// HTTPClient 为空时使用 http.DefaultClient，调用方应通过 ctx 控制超时。
 	HTTPClient *http.Client
+	// TargetOS / TargetArch 用于跨平台打包，空值使用本机 runtime.GOOS/GOARCH。
+	// 值采用 Go 的 GOOS/GOARCH 命名（darwin 表示 macOS）。
+	TargetOS   string
+	TargetArch string
 	// Progress 接收进度消息（不含 "[Fabric]" 前缀），调用已串行化。
 	Progress func(string)
 }
@@ -72,6 +76,14 @@ func (o Options) normalize() options {
 		concurrency: o.Concurrency,
 		retries:     o.Retries,
 		retryDelay:  o.RetryDelay,
+		targetOS:    o.TargetOS,
+		targetArch:  o.TargetArch,
+	}
+	if n.targetOS == "" {
+		n.targetOS = runtime.GOOS
+	}
+	if n.targetArch == "" {
+		n.targetArch = runtime.GOARCH
 	}
 	if n.metaBase == "" {
 		n.metaBase = defaultMetaBase
@@ -119,6 +131,9 @@ func Install(ctx context.Context, instanceDir, gameVersion, loaderVersion string
 		return Result{}, err
 	}
 	o := opts.normalize()
+	if err := validateTargetPlatform(o.targetOS, o.targetArch); err != nil {
+		return Result{}, err
+	}
 
 	profileID := fmt.Sprintf("fabric-loader-%s-%s", loaderVersion, gameVersion)
 	profileURL := fmt.Sprintf("%s/v2/versions/loader/%s/%s/profile/json",
@@ -180,7 +195,7 @@ func Install(ctx context.Context, instanceDir, gameVersion, loaderVersion string
 		}
 	}
 
-	vanillaArts, err := vanillaArtifacts(vanilla, runtime.GOOS, runtime.GOARCH)
+	vanillaArts, err := vanillaArtifacts(vanilla, o.targetOS, o.targetArch, o.progress)
 	if err != nil {
 		return Result{}, err
 	}
@@ -316,6 +331,21 @@ func mavenLibraryPath(name string) (string, error) {
 		return "", fmt.Errorf("maven 坐标 %q 生成的路径非法: %w", name, err)
 	}
 	return full, nil
+}
+
+var (
+	validTargetOS   = map[string]bool{"windows": true, "linux": true, "darwin": true}
+	validTargetArch = map[string]bool{"amd64": true, "arm64": true, "386": true, "arm": true}
+)
+
+func validateTargetPlatform(goos, goarch string) error {
+	if !validTargetOS[goos] {
+		return fmt.Errorf("不支持的目标系统 %q（可选 windows/linux/darwin）", goos)
+	}
+	if !validTargetArch[goarch] {
+		return fmt.Errorf("不支持的目标架构 %q（可选 amd64/arm64/386/arm）", goarch)
+	}
+	return nil
 }
 
 func validateVersionSegment(kind, v string) error {

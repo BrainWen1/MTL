@@ -73,6 +73,8 @@ type options struct {
 	concurrency int
 	retries     int
 	retryDelay  time.Duration
+	targetOS    string
+	targetArch  string
 	progress    *reporter
 }
 

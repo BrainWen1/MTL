@@ -96,13 +96,18 @@ func fetchVanillaVersion(ctx context.Context, gameVersion string, o options) ([]
 	return data, nil
 }
 
-// vanillaArtifacts 按当前平台规则筛选 vanilla libraries。
+// vanillaArtifacts 按目标平台筛选 vanilla libraries。
 // 兼容两种格式：现代版每条 library 自带 artifact + rules；旧版使用 natives/classifiers。
-func vanillaArtifacts(v mojangVersion, goos, goarch string) ([]artifact, error) {
+// native 构件在解析阶段按 GOOS/GOARCH 过滤，避免为不匹配的平台发起下载。
+func vanillaArtifacts(v mojangVersion, goos, goarch string, progress *reporter) ([]artifact, error) {
 	osName, archName := ruleOS(goos, goarch)
 	var arts []artifact
 	for _, lib := range v.Libraries {
 		if !rulesAllow(lib.Rules, osName, archName) {
+			continue
+		}
+		if arch, isNative := nativeClassifierArch(libraryClassifier(lib.Name)); isNative && arch != goarch {
+			progress.report(fmt.Sprintf("跳过不匹配当前架构的native: %s", lib.Name))
 			continue
 		}
 		if lib.Downloads.Artifact != nil {
@@ -118,6 +123,10 @@ func vanillaArtifacts(v mojangVersion, goos, goarch string) ([]artifact, error) 
 				continue
 			}
 			classifier = strings.ReplaceAll(classifier, "${arch}", archBits(goarch))
+			if arch, isNative := nativeClassifierArch(classifier); isNative && arch != goarch {
+				progress.report(fmt.Sprintf("跳过不匹配当前架构的native: %s", lib.Name))
+				continue
+			}
 			art, ok := lib.Downloads.Classifiers[classifier]
 			if !ok {
 				continue

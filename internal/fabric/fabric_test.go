@@ -367,7 +367,7 @@ func TestVanillaArtifactsNativeClassifier(t *testing.T) {
 		Rules: []mojangRule{{Action: "allow", OS: &mojangOS{Name: "osx"}}},
 	}
 
-	arts, err := vanillaArtifacts(mojangVersion{Libraries: []mojangLibrary{lib, osxOnly}}, "windows", "amd64")
+	arts, err := vanillaArtifacts(mojangVersion{Libraries: []mojangLibrary{lib, osxOnly}}, "windows", "amd64", nil)
 	if err != nil {
 		t.Fatalf("vanillaArtifacts: %v", err)
 	}
