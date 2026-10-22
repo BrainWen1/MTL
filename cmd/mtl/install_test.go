@@ -3,9 +3,11 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/sha1"
 	"crypto/sha512"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,11 +17,17 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"mtl/internal/fabric"
 	"mtl/internal/mrpack"
 )
 
 func sha512Hex(s string) string {
 	sum := sha512.Sum512([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+func sha1Hex(s string) string {
+	sum := sha1.Sum([]byte(s))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -127,7 +135,7 @@ func TestInstallDownloadsAndExtractsOverrides(t *testing.T) {
 	instance := filepath.Join(t.TempDir(), "inst")
 
 	var out bytes.Buffer
-	if err := installPack(pack, instance, 2, &out); err != nil {
+	if err := installPack(pack, instance, installOptions{concurrency: 2, skipLoader: true}, &out); err != nil {
 		t.Fatalf("installPack: %v", err)
 	}
 
@@ -164,11 +172,11 @@ func TestInstallSkipsExistingFiles(t *testing.T) {
 	pack := buildPack(t, testIndex(srv.URL), nil)
 	instance := filepath.Join(t.TempDir(), "inst")
 
-	if err := installPack(pack, instance, 0, io.Discard); err != nil {
+	if err := installPack(pack, instance, installOptions{skipLoader: true}, io.Discard); err != nil {
 		t.Fatalf("首次安装: %v", err)
 	}
 	var out bytes.Buffer
-	if err := installPack(pack, instance, 0, &out); err != nil {
+	if err := installPack(pack, instance, installOptions{skipLoader: true}, &out); err != nil {
 		t.Fatalf("重复安装: %v", err)
 	}
 
@@ -193,5 +201,123 @@ func TestInstallRejectsBadPack(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing.mrpack")
 	if err := install([]string{"--dir", t.TempDir(), missing}); err == nil {
 		t.Fatal("不存在的包应报错")
+	}
+}
+
+// serveFabric 模拟 Fabric meta + Mojang meta，返回包含单个 library 和 client jar 的极小版本。
+func serveFabric(t *testing.T) *httptest.Server {
+	t.Helper()
+	const (
+		fabricLib = "fabric-jar"
+		clientJar = "client-jar"
+	)
+	routes := map[string]func() []byte{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fn, ok := routes[r.URL.Path]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		w.Write(fn())
+	}))
+	t.Cleanup(srv.Close)
+
+	versionJSON := []byte(fmt.Sprintf(
+		`{"id":"1.20.1","downloads":{"client":{"sha1":%q,"size":%d,"url":%q}},"libraries":[]}`,
+		sha1Hex(clientJar), len(clientJar), srv.URL+"/client.jar"))
+	manifestJSON := []byte(fmt.Sprintf(
+		`{"versions":[{"id":"1.20.1","url":%q,"sha1":%q}]}`,
+		srv.URL+"/mc.json", sha1Hex(string(versionJSON))))
+	profileJSON := []byte(fmt.Sprintf(
+		`{"id":"fabric-loader-0.15.0-1.20.1","inheritsFrom":"1.20.1","libraries":[{"name":"test.group:fabric-lib:1.0","url":%q,"sha512":%q,"size":%d}]}`,
+		srv.URL+"/maven/", sha512Hex(fabricLib), len(fabricLib)))
+
+	routes["/manifest.json"] = func() []byte { return manifestJSON }
+	routes["/mc.json"] = func() []byte { return versionJSON }
+	routes["/client.jar"] = func() []byte { return []byte(clientJar) }
+	routes["/v2/versions/loader/1.20.1/0.15.0/profile/json"] = func() []byte { return profileJSON }
+	routes["/maven/test/group/fabric-lib/1.0/fabric-lib-1.0.jar"] = func() []byte { return []byte(fabricLib) }
+	return srv
+}
+
+func TestInstallFabricLoader(t *testing.T) {
+	srv := serveFabric(t)
+	idx := &mrpack.Index{
+		FormatVersion: 1,
+		Game:          "minecraft",
+		VersionID:     "1.0.0",
+		Name:          "Loader Test",
+		Files:         []mrpack.File{},
+		Dependencies: map[string]string{
+			mrpack.DepMinecraft:    "1.20.1",
+			mrpack.DepFabricLoader: "0.15.0",
+		},
+	}
+	pack := buildPack(t, idx, nil)
+	instance := filepath.Join(t.TempDir(), "inst")
+
+	var out bytes.Buffer
+	err := installPack(pack, instance, installOptions{fabric: fabric.Options{
+		MetaBaseURL:       srv.URL,
+		MojangManifestURL: srv.URL + "/manifest.json",
+	}}, &out)
+	if err != nil {
+		t.Fatalf("installPack: %v", err)
+	}
+
+	const profileID = "fabric-loader-0.15.0-1.20.1"
+	if _, err := os.Stat(filepath.Join(instance, "versions", profileID, profileID+".json")); err != nil {
+		t.Fatalf("缺少 Fabric 版本 json: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(instance, "versions", "1.20.1", "1.20.1.json")); err != nil {
+		t.Fatalf("缺少 vanilla 版本 json: %v", err)
+	}
+	assertFile(t, filepath.Join(instance, "versions", "1.20.1", "1.20.1.jar"), "client-jar")
+	assertFile(t, filepath.Join(instance, "libraries", "test", "group", "fabric-lib", "1.0", "fabric-lib-1.0.jar"), "fabric-jar")
+
+	for _, want := range []string{
+		"[Fabric] 拉取loader元信息",
+		"[Fabric] 下载library test.group:fabric-lib:1.0",
+		"[Fabric] 安装完成",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("输出缺少 %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestInstallSkipLoader(t *testing.T) {
+	srv, _ := serveBodies(t, map[string]string{"/a": "AAA", "/b": "BBB"})
+	pack := buildPack(t, testIndex(srv.URL), nil)
+	instance := filepath.Join(t.TempDir(), "inst")
+
+	var out bytes.Buffer
+	if err := installPack(pack, instance, installOptions{skipLoader: true}, &out); err != nil {
+		t.Fatalf("installPack: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(instance, "versions")); !os.IsNotExist(err) {
+		t.Fatal("--skip-loader 不应写入 versions 目录")
+	}
+	if !strings.Contains(out.String(), "已跳过 Fabric loader 安装") {
+		t.Fatalf("输出缺少跳过提示:\n%s", out.String())
+	}
+}
+
+func TestInstallRejectsUnsupportedLoader(t *testing.T) {
+	idx := &mrpack.Index{
+		FormatVersion: 1,
+		Game:          "minecraft",
+		VersionID:     "1.0.0",
+		Name:          "Quilt Test",
+		Files:         []mrpack.File{},
+		Dependencies: map[string]string{
+			mrpack.DepMinecraft:   "1.20.1",
+			mrpack.DepQuiltLoader: "0.20.0",
+		},
+	}
+	pack := buildPack(t, idx, nil)
+	err := installPack(pack, filepath.Join(t.TempDir(), "inst"), installOptions{}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "quilt") {
+		t.Fatalf("应拒绝非 Fabric loader，实际: %v", err)
 	}
 }

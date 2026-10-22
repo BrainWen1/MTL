@@ -9,6 +9,7 @@ import (
 	"os/signal"
 
 	"mtl/internal/downloader"
+	"mtl/internal/fabric"
 	"mtl/internal/mrpack"
 )
 
@@ -40,7 +41,7 @@ func run(args []string) error {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "用法:")
-	fmt.Fprintln(os.Stderr, "  mtl install --dir <实例目录> [--concurrency N] <pack.mrpack>")
+	fmt.Fprintln(os.Stderr, "  mtl install --dir <实例目录> [--concurrency N] [--skip-loader] <pack.mrpack>")
 	fmt.Fprintln(os.Stderr, "  mtl inspect [--extract <dir>] <pack.mrpack>")
 	fmt.Fprintln(os.Stderr, "  mtl version")
 }
@@ -49,21 +50,29 @@ func install(args []string) error {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	dir := fs.String("dir", "", "实例目录（必填）")
 	concurrency := fs.Int("concurrency", 0, "并发下载数，0 表示使用默认值")
+	skipLoader := fs.Bool("skip-loader", false, "跳过 Fabric loader 安装")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("用法: mtl install --dir <实例目录> [--concurrency N] <pack.mrpack>")
+		return fmt.Errorf("用法: mtl install --dir <实例目录> [--concurrency N] [--skip-loader] <pack.mrpack>")
 	}
 	if *dir == "" {
 		return fmt.Errorf("必须用 --dir 指定实例目录")
 	}
-	return installPack(fs.Arg(0), *dir, *concurrency, os.Stdout)
+	return installPack(fs.Arg(0), *dir, installOptions{concurrency: *concurrency, skipLoader: *skipLoader}, os.Stdout)
 }
 
-// installPack 初始化实例目录、下载客户端文件并解压 overrides。
+type installOptions struct {
+	concurrency int
+	skipLoader  bool
+	// fabric 仅用于测试注入 mock 服务地址；零值使用官方端点。
+	fabric fabric.Options
+}
+
+// installPack 初始化实例目录、下载客户端文件、解压 overrides，最后安装 Fabric loader。
 // 下载先于解压，保证 overrides 中的同名文件拥有最终优先级。
-func installPack(packPath, dir string, concurrency int, out io.Writer) error {
+func installPack(packPath, dir string, opts installOptions, out io.Writer) error {
 	p, err := mrpack.Open(packPath)
 	if err != nil {
 		return err
@@ -86,7 +95,7 @@ func installPack(packPath, dir string, concurrency int, out io.Writer) error {
 	defer stop()
 
 	results, err := downloader.Download(ctx, dir, files, downloader.Options{
-		Concurrency: concurrency,
+		Concurrency: opts.concurrency,
 		Progress: func(done, total int, res downloader.Result) {
 			note := ""
 			if res.Skipped {
@@ -111,6 +120,26 @@ func installPack(packPath, dir string, concurrency int, out io.Writer) error {
 		return fmt.Errorf("解压 overrides 失败: %w", err)
 	}
 	fmt.Fprintln(out, "overrides 已解压")
+
+	if opts.skipLoader {
+		fmt.Fprintln(out, "已跳过 Fabric loader 安装")
+		fmt.Fprintf(out, "实例安装完成: %s\n", dir)
+		return nil
+	}
+	if loaderType != mrpack.LoaderFabric {
+		return fmt.Errorf("暂不支持 %s loader 的自动安装", loaderType)
+	}
+
+	fabOpts := opts.fabric
+	fabOpts.Concurrency = opts.concurrency
+	fabOpts.Progress = func(msg string) {
+		fmt.Fprintf(out, "[Fabric] %s\n", msg)
+	}
+	res, err := fabric.Install(ctx, dir, idx.Dependencies[mrpack.DepMinecraft], loaderVersion, fabOpts)
+	if err != nil {
+		return fmt.Errorf("Fabric loader 安装失败: %w", err)
+	}
+	fmt.Fprintf(out, "[Fabric] 安装完成: %s（下载 %d，跳过 %d）\n", res.ProfileID, res.Downloaded, res.Skipped)
 	fmt.Fprintf(out, "实例安装完成: %s\n", dir)
 	return nil
 }
