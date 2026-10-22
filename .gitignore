@@ -1,0 +1,35 @@
+# 编译产物
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+
+# MTL 运行产生的实例（重点！mod、游戏文件全在这里，不要提交）
+instances/
+
+# 本地测试用的mrpack包，你自己放的测试包目录
+mtl-test/
+
+# Claude Code 本地配置（settings.local.json 是你本机私有设置，不要提交）
+.claude/settings.local.json
+.claudeignore
+
+# Go 测试覆盖率、临时文件
+coverage.out
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 系统垃圾
+.DS_Store
+Thumbs.db
+
+# 环境、本地私有配置
+.env
+*.local.json
