@@ -2,14 +2,17 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 
 	"mtl/internal/downloader"
 	"mtl/internal/fabric"
+	"mtl/internal/launch"
 	"mtl/internal/mrpack"
 )
 
@@ -28,6 +31,8 @@ func run(args []string) error {
 	switch args[0] {
 	case "install":
 		return install(args[1:])
+	case "run":
+		return runInstance(args[1:])
 	case "inspect":
 		return inspect(args[1:])
 	case "version":
@@ -42,6 +47,7 @@ func run(args []string) error {
 func usage() {
 	fmt.Fprintln(os.Stderr, "用法:")
 	fmt.Fprintln(os.Stderr, "  mtl install --dir <实例目录> [--concurrency N] [--skip-loader] <pack.mrpack>")
+	fmt.Fprintln(os.Stderr, "  mtl run --dir <实例目录> [--username <名字>] [--java <java路径>] [--jvm-arg <参数>]... [--debug]")
 	fmt.Fprintln(os.Stderr, "  mtl inspect [--extract <dir>] <pack.mrpack>")
 	fmt.Fprintln(os.Stderr, "  mtl version")
 }
@@ -141,6 +147,50 @@ func installPack(packPath, dir string, opts installOptions, out io.Writer) error
 	}
 	fmt.Fprintf(out, "[Fabric] 安装完成: %s（下载 %d，跳过 %d）\n", res.ProfileID, res.Downloaded, res.Skipped)
 	fmt.Fprintf(out, "实例安装完成: %s\n", dir)
+	return nil
+}
+
+func runInstance(args []string) error {
+	fs := flag.NewFlagSet("run", flag.ContinueOnError)
+	dir := fs.String("dir", "", "实例目录（必填）")
+	username := fs.String("username", "Player", "离线模式用户名")
+	javaPath := fs.String("java", "", "java 可执行文件完整路径，默认从 PATH 查找")
+	debug := fs.Bool("debug", false, "打印完整启动命令")
+	var extraJVM stringList
+	fs.Var(&extraJVM, "jvm-arg", "追加 JVM 参数，可重复指定")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("用法: mtl run --dir <实例目录> [--username <名字>] [--java <java路径>] [--jvm-arg <参数>]... [--debug]")
+	}
+	if *dir == "" {
+		return fmt.Errorf("必须用 --dir 指定实例目录")
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	err := launch.Run(ctx, launch.Options{
+		InstanceDir:  *dir,
+		Username:     *username,
+		JavaPath:     *javaPath,
+		ExtraJVMArgs: extraJVM,
+		Debug:        *debug,
+		Out:          os.Stdout,
+		ErrOut:       os.Stderr,
+	})
+	if errors.Is(err, context.Canceled) {
+		return nil
+	}
+	return err
+}
+
+type stringList []string
+
+func (s *stringList) String() string { return strings.Join(*s, " ") }
+
+func (s *stringList) Set(v string) error {
+	*s = append(*s, v)
 	return nil
 }
 
