@@ -15,6 +15,7 @@ import (
 	"mtl/internal/downloader"
 	"mtl/internal/fabric"
 	"mtl/internal/launch"
+	"mtl/internal/memory"
 	"mtl/internal/mrpack"
 	"mtl/internal/runtime"
 )
@@ -52,7 +53,7 @@ func run(args []string) error {
 func usage() {
 	fmt.Fprintln(os.Stderr, "用法:")
 	fmt.Fprintln(os.Stderr, "  mtl install --dir <实例目录> [--concurrency N] [--skip-loader] <pack.mrpack>")
-	fmt.Fprintln(os.Stderr, "  mtl run --dir <实例目录> [--account <账号>] [--username <名字>] [--java <java路径>] [--jvm-arg <参数>]... [--debug]")
+	fmt.Fprintln(os.Stderr, "  mtl run --dir <实例目录> [--account <账号>] [--username <名字>] [--memory <内存>] [--memory-auto] [--java <java路径>] [--jvm-arg <参数>]... [--game-arg <参数>]... [--debug]")
 	fmt.Fprintln(os.Stderr, "  mtl inspect [--extract <dir>] <pack.mrpack>")
 	fmt.Fprintln(os.Stderr, "  mtl account list")
 	fmt.Fprintln(os.Stderr, "  mtl account add <name>")
@@ -163,24 +164,38 @@ func runInstance(args []string) error {
 	dir := fs.String("dir", "", "实例目录（必填）")
 	accountName := fs.String("account", "", "已保存的离线账号；优先于 --username")
 	username := fs.String("username", "Player", "离线模式用户名；未保存时临时使用")
+	memoryValue := fs.String("memory", memory.DefaultValue, "JVM 最大堆，例如 4G、512M；默认 2G")
+	memoryAuto := fs.Bool("memory-auto", false, "按物理内存自动计算 JVM 最大堆；开启后忽略 --memory")
 	javaPath := fs.String("java", "", "java 可执行文件完整路径；不传则自动使用 Mojang 官方 Java 运行时")
 	debug := fs.Bool("debug", false, "打印完整启动命令")
+	// --jvm-arg 与 --game-arg 分开收集：前者进 JVM 参数区，后者只进主类之后的游戏参数区。
 	var extraJVM stringList
-	fs.Var(&extraJVM, "jvm-arg", "追加 JVM 参数，可重复指定")
+	fs.Var(&extraJVM, "jvm-arg", "追加 JVM 参数（可重复），排在内存参数之后、主类之前")
+	var extraGame stringList
+	fs.Var(&extraGame, "game-arg", "追加游戏参数（可重复），只排在主类之后")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	usernameSet := false
+	memorySet := false
 	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "username" {
+		switch f.Name {
+		case "username":
 			usernameSet = true
+		case "memory":
+			memorySet = true
 		}
 	})
 	if fs.NArg() != 0 {
-		return fmt.Errorf("用法: mtl run --dir <实例目录> [--account <账号>] [--username <名字>] [--java <java路径>] [--jvm-arg <参数>]... [--debug]")
+		return fmt.Errorf("用法: mtl run --dir <实例目录> [--account <账号>] [--username <名字>] [--memory <内存>] [--memory-auto] [--java <java路径>] [--jvm-arg <参数>]... [--game-arg <参数>]... [--debug]")
 	}
 	if *dir == "" {
 		return fmt.Errorf("必须用 --dir 指定实例目录")
+	}
+
+	mem, err := resolveMemory(*memoryValue, *memoryAuto, memorySet, os.Stdout, os.Stderr)
+	if err != nil {
+		return err
 	}
 
 	store, storeErr := account.OpenDefault()
@@ -241,20 +256,78 @@ func runInstance(args []string) error {
 	}
 
 	err = launch.Run(ctx, launch.Options{
-		InstanceDir:  *dir,
-		Username:     name,
-		UUID:         uuid,
-		JavaPath:     resolvedJava,
-		AssetsDir:    assetsDir,
-		ExtraJVMArgs: extraJVM,
-		Debug:        *debug,
-		Out:          os.Stdout,
-		ErrOut:       os.Stderr,
+		InstanceDir:   *dir,
+		Username:      name,
+		UUID:          uuid,
+		JavaPath:      resolvedJava,
+		AssetsDir:     assetsDir,
+		Memory:        mem,
+		ExtraJVMArgs:  extraJVM,
+		ExtraGameArgs: extraGame,
+		Debug:         *debug,
+		Out:           os.Stdout,
+		ErrOut:        os.Stderr,
 	})
 	if errors.Is(err, context.Canceled) {
 		return nil
 	}
 	return err
+}
+
+// resolveMemory 读取本机物理内存并生成 JVM 堆参数。
+// 读取失败时非自动模式只做最小值校验；自动模式无法计算，直接报错。
+func resolveMemory(value string, auto, valueSet bool, out, errOut io.Writer) (*launch.Memory, error) {
+	if out == nil {
+		out = io.Discard
+	}
+	if errOut == nil {
+		errOut = io.Discard
+	}
+	total, available, detectErr := memory.SystemMemory()
+	if auto && (detectErr != nil || total <= 0) {
+		if detectErr != nil {
+			return nil, fmt.Errorf("自动内存模式无法读取物理内存: %w", detectErr)
+		}
+		return nil, errors.New("自动内存模式无法读取物理内存")
+	}
+	if detectErr != nil {
+		fmt.Fprintf(errOut, "[Launch] 警告: 无法读取物理内存（%v），跳过 90%% 上限校验\n", detectErr)
+	}
+	return buildMemory(value, auto, valueSet, total, available, out)
+}
+
+// buildMemory 是 resolveMemory 的纯计算部分，便于用固定内存总量做单元测试。
+func buildMemory(value string, auto, valueSet bool, total, available int64, out io.Writer) (*launch.Memory, error) {
+	if out == nil {
+		out = io.Discard
+	}
+	var maxBytes int64
+	if auto {
+		if total <= 0 {
+			return nil, errors.New("自动内存模式无法读取物理内存")
+		}
+		if valueSet {
+			fmt.Fprintf(out, "[Launch] 自动内存模式已开启，忽略 --memory=%s\n", value)
+		}
+		maxBytes = memory.AutoMax(total)
+		free := "未知"
+		if available > 0 {
+			free = memory.Format(available)
+		}
+		fmt.Fprintf(out, "[Launch] 自动内存模式：物理内存 %s（空闲 %s），推荐 Xmx=%s\n",
+			memory.Format(total), free, memory.Format(maxBytes))
+	} else {
+		var err error
+		maxBytes, err = memory.Parse(value)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := memory.Validate(maxBytes, total); err != nil {
+		return nil, err
+	}
+	alloc := memory.NewAllocation(maxBytes)
+	return &launch.Memory{Min: alloc.Xms(), Max: alloc.Xmx()}, nil
 }
 
 type stringList []string
