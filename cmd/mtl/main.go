@@ -13,6 +13,7 @@ import (
 	"mtl/internal/account"
 	"mtl/internal/assets"
 	"mtl/internal/config"
+	"mtl/internal/crash"
 	"mtl/internal/downloader"
 	"mtl/internal/fabric"
 	"mtl/internal/launch"
@@ -304,6 +305,13 @@ func runInstance(args []string) error {
 		return err
 	}
 
+	// 崩溃归档：启动前记录已有日志，游戏退出后只处理本次新增或变化的 crash-*.txt。
+	// 目录创建或归档失败只告警，不影响启动。
+	if mkErr := crash.EnsureArchiveDir(*dir); mkErr != nil {
+		fmt.Fprintf(os.Stderr, "[Crash] 归档崩溃日志失败: %v\n", mkErr)
+	}
+	crashBaseline := crash.TakeSnapshot(*dir)
+
 	err = launch.Run(ctx, launch.Options{
 		InstanceDir:       *dir,
 		Username:          name,
@@ -318,6 +326,24 @@ func runInstance(args []string) error {
 		Out:               os.Stdout,
 		ErrOut:            os.Stderr,
 	})
+
+	// 游戏进程退出（无论正常还是崩溃）后归档并诊断本次崩溃日志；没有新日志时保持静默。
+	reports, crashWarnings := crash.Collect(crash.Options{InstanceDir: *dir, Baseline: crashBaseline})
+	for _, w := range crashWarnings {
+		fmt.Fprintf(os.Stderr, "[Crash] 归档崩溃日志失败: %s\n", w)
+	}
+	for _, r := range reports {
+		if *debug {
+			fmt.Fprintf(os.Stdout, "[Crash] 扫描到崩溃日志: %s\n", r.Source)
+			if r.Archived != "" {
+				fmt.Fprintf(os.Stdout, "[Crash] 已归档: %s\n", r.Archived)
+			}
+		}
+		for _, d := range r.Diagnoses {
+			fmt.Fprintf(os.Stdout, "[Crash] %s\n", d)
+		}
+	}
+
 	if errors.Is(err, context.Canceled) {
 		return nil
 	}
