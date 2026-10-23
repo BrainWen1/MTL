@@ -56,13 +56,14 @@ func run(args []string) error {
 func usage() {
 	fmt.Fprintln(os.Stderr, "用法:")
 	fmt.Fprintln(os.Stderr, "  mtl install --dir <实例目录> [--concurrency N] [--skip-loader] <pack.mrpack>")
-	fmt.Fprintln(os.Stderr, "  mtl run --dir <实例目录> [--account <账号>] [--username <名字>] [--memory <内存>] [--memory-auto] [--java <java路径>] [--jvm-arg <参数>]... [--game-arg <参数>]... [--debug]")
+	fmt.Fprintln(os.Stderr, "  mtl run --dir <实例目录> [--account <账号>] [--username <名字>] [--memory <内存>] [--memory-auto] [--highperf-gpu|--no-highperf-gpu] [--java <java路径>] [--jvm-arg <参数>]... [--game-arg <参数>]... [--debug]")
 	fmt.Fprintln(os.Stderr, "  mtl inspect [--extract <dir>] <pack.mrpack>")
 	fmt.Fprintln(os.Stderr, "  mtl account list")
 	fmt.Fprintln(os.Stderr, "  mtl account add <name>")
 	fmt.Fprintln(os.Stderr, "  mtl account rm <name>")
 	fmt.Fprintln(os.Stderr, "  mtl config show --dir <实例目录>")
 	fmt.Fprintln(os.Stderr, "  mtl config set-memory <auto|manual> [--value 4G] --dir <实例目录>")
+	fmt.Fprintln(os.Stderr, "  mtl config set-highperf-gpu <true|false> --dir <实例目录>")
 	fmt.Fprintln(os.Stderr, "  mtl config add-jvm-arg|remove-jvm-arg --dir <实例目录> <参数>")
 	fmt.Fprintln(os.Stderr, "  mtl config add-game-arg|remove-game-arg --dir <实例目录> <参数>")
 	fmt.Fprintln(os.Stderr, "  mtl config reset --dir <实例目录>")
@@ -175,6 +176,8 @@ func runInstance(args []string) error {
 	memoryValue := fs.String("memory", memory.DefaultValue, "JVM 最大堆，例如 4G、512M；默认 2G")
 	memoryAuto := fs.Bool("memory-auto", false, "按物理内存自动计算 JVM 最大堆；开启后忽略 --memory")
 	javaPath := fs.String("java", "", "java 可执行文件完整路径；不传则自动使用 Mojang 官方 Java 运行时")
+	highPerfGPU := fs.Bool("highperf-gpu", false, "本次启动强制优先使用高性能显卡（覆盖实例配置，仅 Windows 生效）")
+	noHighPerfGPU := fs.Bool("no-highperf-gpu", false, "本次启动强制关闭高性能显卡调度（覆盖实例配置）")
 	debug := fs.Bool("debug", false, "打印完整启动命令")
 	// --jvm-arg 与 --game-arg 分开收集：前者进 JVM 参数区，后者只进主类之后的游戏参数区。
 	var extraJVM stringList
@@ -186,28 +189,45 @@ func runInstance(args []string) error {
 	}
 	usernameSet := false
 	memorySet := false
+	highPerfGPUSet := false
+	noHighPerfGPUSet := false
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "username":
 			usernameSet = true
 		case "memory":
 			memorySet = true
+		case "highperf-gpu":
+			highPerfGPUSet = true
+		case "no-highperf-gpu":
+			noHighPerfGPUSet = true
 		}
 	})
+	if highPerfGPUSet && noHighPerfGPUSet {
+		return fmt.Errorf("--highperf-gpu 与 --no-highperf-gpu 不能同时使用")
+	}
+	highPerfGPUValue := *highPerfGPU
+	highPerfCLISet := highPerfGPUSet || noHighPerfGPUSet
+	if noHighPerfGPUSet {
+		highPerfGPUValue = !*noHighPerfGPU
+	}
 	if fs.NArg() != 0 {
-		return fmt.Errorf("用法: mtl run --dir <实例目录> [--account <账号>] [--username <名字>] [--memory <内存>] [--memory-auto] [--java <java路径>] [--jvm-arg <参数>]... [--game-arg <参数>]... [--debug]")
+		return fmt.Errorf("用法: mtl run --dir <实例目录> [--account <账号>] [--username <名字>] [--memory <内存>] [--memory-auto] [--highperf-gpu|--no-highperf-gpu] [--java <java路径>] [--jvm-arg <参数>]... [--game-arg <参数>]... [--debug]")
 	}
 	if *dir == "" {
 		return fmt.Errorf("必须用 --dir 指定实例目录")
 	}
 
-	// 实例配置优先级低于命令行：--memory 覆盖实例内存设置，--memory-auto 强制自动内存。
+	// 实例配置优先级低于命令行：--memory 覆盖实例内存设置，--memory-auto 强制自动内存；
+	// --highperf-gpu/--no-highperf-gpu 覆盖实例的高性能显卡设置。
 	instanceCfg := loadInstanceConfig(*dir)
 	memChoice := config.EffectiveMemory(instanceCfg, *memoryValue, memorySet, *memoryAuto)
+	preferHighPerfGPU, gpuSource := config.EffectiveHighPerfGPU(instanceCfg, highPerfGPUValue, highPerfCLISet)
 	if *debug {
 		fmt.Fprintf(os.Stdout, "[Config] 实例配置文件: %s\n", configPathForLog(*dir))
 		fmt.Fprintf(os.Stdout, "[Config] 读取到的实例配置:\n%s\n", config.Format(instanceCfg))
 		fmt.Fprintf(os.Stdout, "[Config] 内存来源: %s\n", memChoice.Source)
+		fmt.Fprintf(os.Stdout, "[Config] 高性能显卡调度: %v（来源: %s）\n", preferHighPerfGPU, gpuSource)
 	}
 	mem, err := resolveMemory(memChoice.Value, memChoice.Auto, memChoice.ValueSet, os.Stdout, os.Stderr)
 	if err != nil {
@@ -280,17 +300,18 @@ func runInstance(args []string) error {
 	}
 
 	err = launch.Run(ctx, launch.Options{
-		InstanceDir:   *dir,
-		Username:      name,
-		UUID:          uuid,
-		JavaPath:      resolvedJava,
-		AssetsDir:     assetsDir,
-		Memory:        mem,
-		ExtraJVMArgs:  jvmArgs,
-		ExtraGameArgs: gameArgs,
-		Debug:         *debug,
-		Out:           os.Stdout,
-		ErrOut:        os.Stderr,
+		InstanceDir:       *dir,
+		Username:          name,
+		UUID:              uuid,
+		JavaPath:          resolvedJava,
+		AssetsDir:         assetsDir,
+		Memory:            mem,
+		ExtraJVMArgs:      jvmArgs,
+		ExtraGameArgs:     gameArgs,
+		PreferHighPerfGPU: preferHighPerfGPU,
+		Debug:             *debug,
+		Out:               os.Stdout,
+		ErrOut:            os.Stderr,
 	})
 	if errors.Is(err, context.Canceled) {
 		return nil

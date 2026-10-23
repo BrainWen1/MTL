@@ -104,6 +104,47 @@ func TestConfigReset(t *testing.T) {
 	}
 }
 
+func TestConfigSetHighPerfGPU(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := configCommand([]string{"set-highperf-gpu", "--dir", dir, "true"}); err != nil {
+		t.Fatalf("set-highperf-gpu true: %v", err)
+	}
+	cfg, err := config.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.PreferHighPerfGPU {
+		t.Fatalf("prefer_high_perf_gpu 应为 true: %+v", cfg)
+	}
+
+	// 重复设置相同值保持幂等。
+	if err := configCommand([]string{"set-highperf-gpu", "--dir", dir, "true"}); err != nil {
+		t.Fatalf("重复开启应幂等: %v", err)
+	}
+
+	if err := configCommand([]string{"set-highperf-gpu", "--dir", dir, "false"}); err != nil {
+		t.Fatalf("set-highperf-gpu false: %v", err)
+	}
+	cfg, err = config.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PreferHighPerfGPU {
+		t.Fatalf("prefer_high_perf_gpu 应为 false: %+v", cfg)
+	}
+
+	for _, args := range [][]string{
+		{"set-highperf-gpu", "--dir", dir, "maybe"}, // 非法布尔值
+		{"set-highperf-gpu", "--dir", dir},          // 缺参数
+		{"set-highperf-gpu", "true"},                // 缺 --dir
+	} {
+		if err := configCommand(args); err == nil {
+			t.Fatalf("config %v 应报错", args)
+		}
+	}
+}
+
 func TestConfigCorruptFileFallsBack(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, config.DirName, config.FileName)

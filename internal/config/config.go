@@ -34,14 +34,19 @@ type Config struct {
 	ManualMemory string   `json:"manual_memory"`
 	JVMArgs      []string `json:"jvm_args"`
 	GameArgs     []string `json:"game_args"`
+	// PreferHighPerfGPU 开启后在 Windows 上为 Java 进程设置高性能 GPU 首选项。
+	// 非 Windows 平台静默忽略；默认 false。
+	PreferHighPerfGPU bool `json:"prefer_high_perf_gpu"`
 }
 
-// Default 返回配置文件缺失或损坏时使用的默认配置：自动内存、无自定义参数。
+// Default 返回配置文件缺失或损坏时使用的默认配置：自动内存、无自定义参数、
+// 不启用高性能 GPU 调度。
 func Default() Config {
 	return Config{
-		MemoryMode: ModeAuto,
-		JVMArgs:    []string{},
-		GameArgs:   []string{},
+		MemoryMode:        ModeAuto,
+		JVMArgs:           []string{},
+		GameArgs:          []string{},
+		PreferHighPerfGPU: false,
 	}
 }
 
@@ -191,6 +196,18 @@ func EffectiveMemory(cfg Config, cliValue string, cliValueSet, cliAuto bool) Mem
 	default:
 		return MemoryChoice{Auto: true, Source: "实例配置/默认（auto）"}
 	}
+}
+
+// EffectiveHighPerfGPU 按“命令行 > 实例配置 > 默认 false”的优先级解析高性能 GPU 调度。
+// cliSet 表示命令行动了显式设置（--highperf-gpu 或 --no-highperf-gpu）。
+func EffectiveHighPerfGPU(cfg Config, cliValue, cliSet bool) (enabled bool, source string) {
+	if cliSet {
+		return cliValue, "命令行 --highperf-gpu/--no-highperf-gpu"
+	}
+	if cfg.PreferHighPerfGPU {
+		return true, "实例配置（prefer_high_perf_gpu）"
+	}
+	return false, "实例配置/默认（false）"
 }
 
 // MergeArgs 合并参数：实例配置在前，命令行追加在后。

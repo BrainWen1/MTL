@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -36,6 +38,26 @@ type Options struct {
 	// ExtraGameArgs 是 --game-arg 传入的游戏参数（对应 PCL 高级选项的“游戏参数”）。
 	// 只拼在主类之后，绝不会进入 JVM 参数区。
 	ExtraGameArgs []string
+	// PreferHighPerfGPU 开启后：
+	//   1) 在 Windows 上为 Java 可执行文件设置系统级高性能 GPU 首选项（非 Windows 静默跳过）；
+	//   2) 追加 -Dsun.java2d.d3d=true JVM 参数（已存在则不重复追加）。
+	// 系统首选项设置失败只告警，不阻断启动。
+	PreferHighPerfGPU bool
+}
+
+// d3dJVMArg 是启用高性能 GPU 调度时追加的 JVM 参数。
+// 它只负责让 Java2D 走 D3D 渲染，GPU 偏好本身由操作系统层设置。
+const d3dJVMArg = "-Dsun.java2d.d3d=true"
+
+// ensureD3DArg 在启用高性能 GPU 时追加 D3D 参数；已有相同参数时不重复追加。
+func ensureD3DArg(jvm []string, enabled bool) ([]string, bool) {
+	if !enabled {
+		return jvm, false
+	}
+	if slices.Contains(jvm, d3dJVMArg) {
+		return jvm, false
+	}
+	return append(jvm, d3dJVMArg), true
 }
 
 // Memory 是注入给 JVM 的堆参数，值形如 "4G"、"512M"。
@@ -163,6 +185,7 @@ func Run(ctx context.Context, opts Options) error {
 		return err
 	}
 	jvm, memArgs := composeJVM(jvm, opts.Memory, opts.ExtraJVMArgs)
+	jvm, d3dAdded := ensureD3DArg(jvm, opts.PreferHighPerfGPU)
 	if len(memArgs) > 0 {
 		fmt.Fprintf(out, "[Launch] JVM内存参数：%s\n", strings.Join(memArgs, " "))
 	}
@@ -170,6 +193,39 @@ func Run(ctx context.Context, opts Options) error {
 	game = append(game, filterArgs(opts.ExtraGameArgs)...)
 	args := append(jvm, l.MainClass)
 	args = append(args, game...)
+
+	if opts.Debug {
+		logf("高性能GPU调度: %v；操作系统: %s", opts.PreferHighPerfGPU, runtime.GOOS)
+		switch {
+		case !opts.PreferHighPerfGPU:
+			logf("高性能GPU: 未启用，不追加 %s", d3dJVMArg)
+		case d3dAdded:
+			logf("高性能GPU: 已追加 JVM 参数 %s", d3dJVMArg)
+		default:
+			logf("高性能GPU: JVM 参数 %s 已存在，不重复追加", d3dJVMArg)
+		}
+	}
+
+	// 在创建 Java 进程之前设置系统 GPU 首选项。失败仅告警，不阻断游戏启动。
+	if opts.PreferHighPerfGPU {
+		supported, gpuErr := applyHighPerfGPUPreference(javaPath)
+		switch {
+		case gpuErr != nil:
+			fmt.Fprintf(errOut, "[Launch] 警告: 设置高性能GPU优先失败（游戏仍会启动）: %v\n", gpuErr)
+			if opts.Debug {
+				logf("高性能GPU: 系统 GPU 偏好设置失败，已跳过")
+			}
+		case !supported:
+			if opts.Debug {
+				logf("高性能GPU: 当前平台不支持系统 GPU 偏好设置，已跳过")
+			}
+		default:
+			logf("高性能GPU: 已启用 Windows 高性能显卡首选项")
+			if opts.Debug {
+				logf("高性能GPU: 已为 %s 写入 GPU 首选项", javaPath)
+			}
+		}
+	}
 
 	cmd := exec.Command(javaPath, args...)
 	cmd.Dir = l.Dir

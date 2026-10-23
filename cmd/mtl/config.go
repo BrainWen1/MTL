@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"mtl/internal/config"
@@ -13,7 +14,7 @@ import (
 // configCommand 处理 mtl config 子命令。配置存放于 <实例目录>/.mtl/config.json。
 func configCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("用法: mtl config <show|set-memory|add-jvm-arg|remove-jvm-arg|add-game-arg|remove-game-arg|reset> ...")
+		return fmt.Errorf("用法: mtl config <show|set-memory|set-highperf-gpu|add-jvm-arg|remove-jvm-arg|add-game-arg|remove-game-arg|reset> ...")
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
@@ -21,6 +22,8 @@ func configCommand(args []string) error {
 		return configShow(rest)
 	case "set-memory":
 		return configSetMemory(rest)
+	case "set-highperf-gpu":
+		return configSetHighPerfGPU(rest)
 	case "add-jvm-arg":
 		return configAddArg(rest, true)
 	case "remove-jvm-arg":
@@ -32,7 +35,7 @@ func configCommand(args []string) error {
 	case "reset":
 		return configReset(rest)
 	default:
-		return fmt.Errorf("未知 config 子命令 %q（可用: show、set-memory、add-jvm-arg、remove-jvm-arg、add-game-arg、remove-game-arg、reset）", sub)
+		return fmt.Errorf("未知 config 子命令 %q（可用: show、set-memory、set-highperf-gpu、add-jvm-arg、remove-jvm-arg、add-game-arg、remove-game-arg、reset）", sub)
 	}
 }
 
@@ -137,6 +140,37 @@ func configSetMemory(args []string) error {
 	} else {
 		fmt.Printf("[Config] 已设置手动内存 %s: %s\n", cfg.ManualMemory, configPathForLog(dir))
 	}
+	return nil
+}
+
+// configSetHighPerfGPU 设置实例是否优先使用高性能显卡（仅 Windows 生效）。
+func configSetHighPerfGPU(args []string) error {
+	dir, _, positional, err := parseConfigArgs(args)
+	if err != nil {
+		return err
+	}
+	if dir == "" {
+		return errors.New("必须用 --dir 指定实例目录")
+	}
+	if len(positional) != 1 {
+		return errors.New("用法: mtl config set-highperf-gpu <true|false> --dir <实例目录>")
+	}
+
+	enabled, err := strconv.ParseBool(strings.ToLower(strings.TrimSpace(positional[0])))
+	if err != nil {
+		return fmt.Errorf("高性能显卡开关值 %q 无效（可用: true、false）", positional[0])
+	}
+
+	cfg := loadInstanceConfig(dir)
+	cfg.PreferHighPerfGPU = enabled
+	if err := config.Save(dir, cfg); err != nil {
+		return err
+	}
+	state := "关闭"
+	if enabled {
+		state = "开启"
+	}
+	fmt.Printf("[Config] 已%s优先使用高性能显卡: %s\n", state, configPathForLog(dir))
 	return nil
 }
 

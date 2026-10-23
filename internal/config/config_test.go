@@ -36,10 +36,11 @@ func TestLoadMissingFileUsesDefaults(t *testing.T) {
 func TestSaveLoadRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	want := Config{
-		MemoryMode:   ModeManual,
-		ManualMemory: "4G",
-		JVMArgs:      []string{"-XX:-OmitStackTraceInFastThrow"},
-		GameArgs:     []string{"--noChat"},
+		MemoryMode:        ModeManual,
+		ManualMemory:      "4G",
+		JVMArgs:           []string{"-XX:-OmitStackTraceInFastThrow"},
+		GameArgs:          []string{"--noChat"},
+		PreferHighPerfGPU: true,
 	}
 	if err := Save(dir, want); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -216,6 +217,40 @@ func TestEffectiveMemoryPriority(t *testing.T) {
 				t.Fatalf("Source = %q，期望包含 %q", got.Source, tt.wantSource)
 			}
 		})
+	}
+}
+
+func TestEffectiveHighPerfGPU(t *testing.T) {
+	tests := []struct {
+		name       string
+		cfg        Config
+		cliValue   bool
+		cliSet     bool
+		want       bool
+		wantSource string
+	}{
+		{"默认关闭", Default(), true, false, false, "默认"},
+		{"实例配置开启", Config{MemoryMode: ModeAuto, PreferHighPerfGPU: true}, false, false, true, "实例配置"},
+		{"命令行开启覆盖实例关闭", Default(), true, true, true, "命令行"},
+		{"命令行关闭覆盖实例开启", Config{MemoryMode: ModeAuto, PreferHighPerfGPU: true}, false, true, false, "命令行"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, source := EffectiveHighPerfGPU(tt.cfg, tt.cliValue, tt.cliSet)
+			if got != tt.want {
+				t.Fatalf("EffectiveHighPerfGPU = %v，期望 %v", got, tt.want)
+			}
+			if !strings.Contains(source, tt.wantSource) {
+				t.Fatalf("Source = %q，期望包含 %q", source, tt.wantSource)
+			}
+		})
+	}
+}
+
+func TestFormatIncludesHighPerfGPUField(t *testing.T) {
+	text := Format(Default())
+	if !strings.Contains(text, `"prefer_high_perf_gpu": false`) {
+		t.Fatalf("Format 未包含 prefer_high_perf_gpu:\n%s", text)
 	}
 }
 
