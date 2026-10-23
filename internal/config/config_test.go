@@ -41,6 +41,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		JVMArgs:           []string{"-XX:-OmitStackTraceInFastThrow"},
 		GameArgs:          []string{"--noChat"},
 		PreferHighPerfGPU: true,
+		DefaultAccount:    "WenWen12",
 	}
 	if err := Save(dir, want); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -251,6 +252,87 @@ func TestFormatIncludesHighPerfGPUField(t *testing.T) {
 	text := Format(Default())
 	if !strings.Contains(text, `"prefer_high_perf_gpu": false`) {
 		t.Fatalf("Format 未包含 prefer_high_perf_gpu:\n%s", text)
+	}
+	if !strings.Contains(text, `"default_account": ""`) {
+		t.Fatalf("Format 未包含 default_account:\n%s", text)
+	}
+}
+
+func TestDefaultAccountRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Default()
+	cfg.DefaultAccount = "WenWen12"
+	if err := Save(dir, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.DefaultAccount != "WenWen12" {
+		t.Fatalf("default_account = %q，期望 WenWen12", got.DefaultAccount)
+	}
+	if text := Format(got); !strings.Contains(text, `"default_account": "WenWen12"`) {
+		t.Fatalf("Format 未包含 default_account:\n%s", text)
+	}
+
+	// 空字符串表示解绑，往返后仍为空。
+	cfg.DefaultAccount = ""
+	if err := Save(dir, cfg); err != nil {
+		t.Fatalf("Save 解绑: %v", err)
+	}
+	got, err = Load(dir)
+	if err != nil {
+		t.Fatalf("Load 解绑: %v", err)
+	}
+	if got.DefaultAccount != "" {
+		t.Fatalf("解绑后 default_account = %q", got.DefaultAccount)
+	}
+}
+
+func TestValidateDefaultAccount(t *testing.T) {
+	valid := []string{"", "WenWen12", "Alex_2"}
+	for _, name := range valid {
+		if err := ValidateDefaultAccount(name); err != nil {
+			t.Fatalf("ValidateDefaultAccount(%q) = %v，期望成功", name, err)
+		}
+	}
+	invalid := []string{"..", "../x", `a\b`, "a/b", "a:b", "a*b", "a?b", "a\"b", "a<b", "a|b", "a\x00b"}
+	for _, name := range invalid {
+		if err := ValidateDefaultAccount(name); err == nil {
+			t.Fatalf("ValidateDefaultAccount(%q) 应报错", name)
+		}
+	}
+
+	// 非法账号名不能写入配置。
+	dir := t.TempDir()
+	if err := Save(dir, Config{MemoryMode: ModeAuto, DefaultAccount: "../evil"}); err == nil {
+		t.Fatal("Save 非法 default_account 应报错")
+	}
+}
+
+func TestEffectiveAccountPriority(t *testing.T) {
+	cfg := Default()
+	cfg.DefaultAccount = "WenWen12"
+
+	got := EffectiveAccount(cfg, "")
+	if !got.Set() || got.Name != "WenWen12" || got.Source != "实例默认账号" {
+		t.Fatalf("无命令行账号 = %+v，期望实例默认账号", got)
+	}
+
+	got = EffectiveAccount(cfg, "Alex")
+	if got.Name != "Alex" || got.Source != "命令行" {
+		t.Fatalf("命令行账号 = %+v，期望覆盖实例默认账号", got)
+	}
+
+	got = EffectiveAccount(Default(), "  Alex  ")
+	if got.Name != "Alex" || got.Source != "命令行" {
+		t.Fatalf("命令行账号未去除空白 = %+v", got)
+	}
+
+	got = EffectiveAccount(Default(), "")
+	if got.Set() {
+		t.Fatalf("无任何账号时应未解析出账号: %+v", got)
 	}
 }
 

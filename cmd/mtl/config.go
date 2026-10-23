@@ -14,7 +14,7 @@ import (
 // configCommand 处理 mtl config 子命令。配置存放于 <实例目录>/.mtl/config.json。
 func configCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("用法: mtl config <show|set-memory|set-highperf-gpu|add-jvm-arg|remove-jvm-arg|add-game-arg|remove-game-arg|reset> ...")
+		return fmt.Errorf("用法: mtl config <show|set-memory|set-highperf-gpu|set-default-account|add-jvm-arg|remove-jvm-arg|add-game-arg|remove-game-arg|reset> ...")
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
@@ -24,6 +24,8 @@ func configCommand(args []string) error {
 		return configSetMemory(rest)
 	case "set-highperf-gpu":
 		return configSetHighPerfGPU(rest)
+	case "set-default-account":
+		return configSetDefaultAccount(rest)
 	case "add-jvm-arg":
 		return configAddArg(rest, true)
 	case "remove-jvm-arg":
@@ -35,7 +37,7 @@ func configCommand(args []string) error {
 	case "reset":
 		return configReset(rest)
 	default:
-		return fmt.Errorf("未知 config 子命令 %q（可用: show、set-memory、set-highperf-gpu、add-jvm-arg、remove-jvm-arg、add-game-arg、remove-game-arg、reset）", sub)
+		return fmt.Errorf("未知 config 子命令 %q（可用: show、set-memory、set-highperf-gpu、set-default-account、add-jvm-arg、remove-jvm-arg、add-game-arg、remove-game-arg、reset）", sub)
 	}
 }
 
@@ -171,6 +173,47 @@ func configSetHighPerfGPU(args []string) error {
 		state = "开启"
 	}
 	fmt.Printf("[Config] 已%s优先使用高性能显卡: %s\n", state, configPathForLog(dir))
+	return nil
+}
+
+// configSetDefaultAccount 绑定实例默认离线账号；账号名为空表示解绑。
+// 只保存账号名称，不校验账号是否已存在，也不涉及任何登录或令牌。
+func configSetDefaultAccount(args []string) error {
+	dir, _, positional, err := parseConfigArgs(args)
+	if err != nil {
+		return err
+	}
+	if dir == "" {
+		return errors.New("必须用 --dir 指定实例目录")
+	}
+	if len(positional) != 1 {
+		return errors.New("用法: mtl config set-default-account --dir <实例目录> <账号名>（传空字符串解绑）")
+	}
+
+	name := strings.TrimSpace(positional[0])
+	if err := config.ValidateDefaultAccount(name); err != nil {
+		return err
+	}
+
+	cfg := loadInstanceConfig(dir)
+	if cfg.DefaultAccount == name {
+		if name == "" {
+			fmt.Printf("[Config] 实例未绑定默认账号，无需解绑: %s\n", configPathForLog(dir))
+		} else {
+			fmt.Printf("[Config] 实例默认账号已是 %s，配置未变化\n", name)
+		}
+		return nil
+	}
+
+	cfg.DefaultAccount = name
+	if err := config.Save(dir, cfg); err != nil {
+		return err
+	}
+	if name == "" {
+		fmt.Printf("[Config] 已解绑实例默认账号: %s\n", configPathForLog(dir))
+	} else {
+		fmt.Printf("[Config] 已绑定实例默认账号 %s: %s\n", name, configPathForLog(dir))
+	}
 	return nil
 }
 

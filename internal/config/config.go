@@ -37,16 +37,20 @@ type Config struct {
 	// PreferHighPerfGPU 开启后在 Windows 上为 Java 进程设置高性能 GPU 首选项。
 	// 非 Windows 平台静默忽略；默认 false。
 	PreferHighPerfGPU bool `json:"prefer_high_perf_gpu"`
+	// DefaultAccount 是实例绑定的默认离线账号名，空字符串表示未绑定。
+	// 只保存账号名称，不存储密码或令牌。
+	DefaultAccount string `json:"default_account"`
 }
 
 // Default 返回配置文件缺失或损坏时使用的默认配置：自动内存、无自定义参数、
-// 不启用高性能 GPU 调度。
+// 不启用高性能 GPU 调度、不绑定默认账号。
 func Default() Config {
 	return Config{
 		MemoryMode:        ModeAuto,
 		JVMArgs:           []string{},
 		GameArgs:          []string{},
 		PreferHighPerfGPU: false,
+		DefaultAccount:    "",
 	}
 }
 
@@ -145,6 +149,27 @@ func Format(cfg Config) string {
 	return string(data)
 }
 
+// ValidateDefaultAccount 对实例默认账号名做轻量校验：空字符串表示解绑；
+// 非空时禁止路径分隔符、控制字符等可能被误用为路径的字符。
+// 这里不做账号存在性检查，只保证写入配置的内容安全。
+func ValidateDefaultAccount(name string) error {
+	if name == "" {
+		return nil
+	}
+	if name == "." || name == ".." {
+		return fmt.Errorf("default_account %q 非法", name)
+	}
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("default_account %q 非法：包含控制字符", name)
+		}
+		if strings.ContainsRune(`/\:*?"<>|`, r) {
+			return fmt.Errorf("default_account %q 非法：包含路径保留字符 %q", name, r)
+		}
+	}
+	return nil
+}
+
 // normalize 补齐缺省字段并校验取值。空 memory_mode 视为 auto。
 func normalize(cfg Config) (Config, error) {
 	cfg.MemoryMode = strings.ToLower(strings.TrimSpace(cfg.MemoryMode))
@@ -152,6 +177,10 @@ func normalize(cfg Config) (Config, error) {
 		cfg.MemoryMode = ModeAuto
 	}
 	cfg.ManualMemory = strings.TrimSpace(cfg.ManualMemory)
+	cfg.DefaultAccount = strings.TrimSpace(cfg.DefaultAccount)
+	if err := ValidateDefaultAccount(cfg.DefaultAccount); err != nil {
+		return Default(), err
+	}
 	if cfg.JVMArgs == nil {
 		cfg.JVMArgs = []string{}
 	}
@@ -208,6 +237,27 @@ func EffectiveHighPerfGPU(cfg Config, cliValue, cliSet bool) (enabled bool, sour
 		return true, "实例配置（prefer_high_perf_gpu）"
 	}
 	return false, "实例配置/默认（false）"
+}
+
+// AccountChoice 是按优先级解析出的本次启动账号及其来源。
+type AccountChoice struct {
+	Name   string
+	Source string
+}
+
+// Set 表示是否解析到了账号。
+func (c AccountChoice) Set() bool { return c.Name != "" }
+
+// EffectiveAccount 按“命令行 --account > 实例配置 default_account”的优先级解析账号。
+// 两者都为空时返回零值，由调用方决定是否报错。
+func EffectiveAccount(cfg Config, cliAccount string) AccountChoice {
+	if name := strings.TrimSpace(cliAccount); name != "" {
+		return AccountChoice{Name: name, Source: "命令行"}
+	}
+	if cfg.DefaultAccount != "" {
+		return AccountChoice{Name: cfg.DefaultAccount, Source: "实例默认账号"}
+	}
+	return AccountChoice{}
 }
 
 // MergeArgs 合并参数：实例配置在前，命令行追加在后。

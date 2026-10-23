@@ -79,58 +79,88 @@ func TestSelectAccount(t *testing.T) {
 	if _, _, err := store.Add("Alex"); err != nil {
 		t.Fatal(err)
 	}
+	if _, _, err := store.Add("WenWen12"); err != nil {
+		t.Fatal(err)
+	}
 	alexUUID := account.OfflineUUID("Alex")
+	wenUUID := account.OfflineUUID("WenWen12")
 
 	t.Run("account 优先于 username", func(t *testing.T) {
-		name, uuid, err := selectAccount("Alex", "Steve", true, store, nil, io.Discard, io.Discard)
-		if err != nil || name != "Alex" || uuid != alexUUID {
-			t.Fatalf("selectAccount = %q, %q, %v", name, uuid, err)
+		name, uuid, source, err := selectAccount("Alex", "Steve", true, "", store, nil, io.Discard, io.Discard)
+		if err != nil || name != "Alex" || uuid != alexUUID || source != "命令行" {
+			t.Fatalf("selectAccount = %q, %q, %q, %v", name, uuid, source, err)
+		}
+	})
+
+	t.Run("实例默认账号", func(t *testing.T) {
+		name, uuid, source, err := selectAccount("", "Player", false, "WenWen12", store, nil, io.Discard, io.Discard)
+		if err != nil || name != "WenWen12" || uuid != wenUUID || source != "实例默认账号" {
+			t.Fatalf("selectAccount = %q, %q, %q, %v", name, uuid, source, err)
+		}
+	})
+
+	t.Run("account 覆盖实例默认账号", func(t *testing.T) {
+		name, uuid, source, err := selectAccount("Alex", "Player", false, "WenWen12", store, nil, io.Discard, io.Discard)
+		if err != nil || name != "Alex" || uuid != alexUUID || source != "命令行" {
+			t.Fatalf("selectAccount = %q, %q, %q, %v", name, uuid, source, err)
+		}
+	})
+
+	t.Run("无 account 且无默认账号时报错", func(t *testing.T) {
+		if _, _, _, err := selectAccount("", "Player", false, "", store, nil, io.Discard, io.Discard); err == nil {
+			t.Fatal("未指定账号应报错")
+		}
+	})
+
+	t.Run("默认账号不存在时报错", func(t *testing.T) {
+		if _, _, _, err := selectAccount("", "Player", false, "Nobody", store, nil, io.Discard, io.Discard); err == nil {
+			t.Fatal("不存在的默认账号应报错")
 		}
 	})
 
 	t.Run("account 不存在时报错", func(t *testing.T) {
-		if _, _, err := selectAccount("Nobody", "", false, store, nil, io.Discard, io.Discard); err == nil {
+		if _, _, _, err := selectAccount("Nobody", "", false, "", store, nil, io.Discard, io.Discard); err == nil {
 			t.Fatal("不存在的账号应报错")
 		}
 	})
 
 	t.Run("临时 username", func(t *testing.T) {
-		name, uuid, err := selectAccount("", "Bob", true, store, nil, io.Discard, io.Discard)
-		if err != nil || name != "Bob" || uuid != account.OfflineUUID("Bob") {
-			t.Fatalf("selectAccount = %q, %q, %v", name, uuid, err)
+		name, uuid, source, err := selectAccount("", "Bob", true, "", store, nil, io.Discard, io.Discard)
+		if err != nil || name != "Bob" || uuid != account.OfflineUUID("Bob") || source != "命令行 --username" {
+			t.Fatalf("selectAccount = %q, %q, %q, %v", name, uuid, source, err)
 		}
 	})
 
 	t.Run("username 命中已保存账号", func(t *testing.T) {
-		name, uuid, err := selectAccount("", "alex", true, store, nil, io.Discard, io.Discard)
+		name, uuid, _, err := selectAccount("", "alex", true, "", store, nil, io.Discard, io.Discard)
 		if err != nil || name != "Alex" || uuid != alexUUID {
 			t.Fatalf("selectAccount = %q, %q, %v", name, uuid, err)
 		}
 	})
 
 	t.Run("非法 username", func(t *testing.T) {
-		if _, _, err := selectAccount("", "bad name", true, store, nil, io.Discard, io.Discard); err == nil {
+		if _, _, _, err := selectAccount("", "bad name", true, "", store, nil, io.Discard, io.Discard); err == nil {
 			t.Fatal("非法用户名应报错")
 		}
 	})
 
 	t.Run("损坏配置回退到 account 名", func(t *testing.T) {
-		name, uuid, err := selectAccount("Alex", "Player", false, nil, errors.New("corrupt"), io.Discard, io.Discard)
+		name, uuid, _, err := selectAccount("Alex", "Player", false, "", nil, errors.New("corrupt"), io.Discard, io.Discard)
 		if err != nil || name != "Alex" || uuid != alexUUID {
 			t.Fatalf("selectAccount = %q, %q, %v", name, uuid, err)
 		}
 	})
 
-	t.Run("损坏配置回退到显式 username", func(t *testing.T) {
-		name, uuid, err := selectAccount("Alex", "Steve", true, nil, errors.New("corrupt"), io.Discard, io.Discard)
-		if err != nil || name != "Steve" || uuid != account.OfflineUUID("Steve") {
-			t.Fatalf("selectAccount = %q, %q, %v", name, uuid, err)
+	t.Run("损坏配置回退到默认账号", func(t *testing.T) {
+		name, uuid, source, err := selectAccount("", "Player", false, "WenWen12", nil, errors.New("corrupt"), io.Discard, io.Discard)
+		if err != nil || name != "WenWen12" || uuid != wenUUID || source != "实例默认账号" {
+			t.Fatalf("selectAccount = %q, %q, %q, %v", name, uuid, source, err)
 		}
 	})
 
-	t.Run("损坏配置默认 Player", func(t *testing.T) {
-		name, uuid, err := selectAccount("", "Player", false, nil, errors.New("corrupt"), io.Discard, io.Discard)
-		if err != nil || name != "Player" || uuid != account.OfflineUUID("Player") {
+	t.Run("损坏配置回退到显式 username", func(t *testing.T) {
+		name, uuid, _, err := selectAccount("Alex", "Steve", true, "", nil, errors.New("corrupt"), io.Discard, io.Discard)
+		if err != nil || name != "Steve" || uuid != account.OfflineUUID("Steve") {
 			t.Fatalf("selectAccount = %q, %q, %v", name, uuid, err)
 		}
 	})

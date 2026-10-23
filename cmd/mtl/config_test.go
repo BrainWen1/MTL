@@ -145,6 +145,70 @@ func TestConfigSetHighPerfGPU(t *testing.T) {
 	}
 }
 
+func TestConfigSetDefaultAccount(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := configCommand([]string{"set-default-account", "--dir", dir, "WenWen12"}); err != nil {
+		t.Fatalf("set-default-account: %v", err)
+	}
+	cfg, err := config.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DefaultAccount != "WenWen12" {
+		t.Fatalf("default_account = %q", cfg.DefaultAccount)
+	}
+
+	// 重复设置相同账号保持幂等。
+	if err := configCommand([]string{"set-default-account", "--dir", dir, "WenWen12"}); err != nil {
+		t.Fatalf("重复设置默认账号应幂等: %v", err)
+	}
+
+	// 空字符串解绑；重复解绑同样幂等。
+	if err := configCommand([]string{"set-default-account", "--dir", dir, ""}); err != nil {
+		t.Fatalf("解绑默认账号: %v", err)
+	}
+	if err := configCommand([]string{"set-default-account", "--dir", dir, ""}); err != nil {
+		t.Fatalf("重复解绑应幂等: %v", err)
+	}
+	cfg, err = config.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DefaultAccount != "" {
+		t.Fatalf("解绑后 default_account = %q", cfg.DefaultAccount)
+	}
+
+	for _, args := range [][]string{
+		{"set-default-account", "--dir", dir},            // 缺账号参数
+		{"set-default-account", "WenWen12"},              // 缺 --dir
+		{"set-default-account", "--dir", dir, "../evil"}, // 危险路径字符
+		{"set-default-account", "--dir", dir, "a/b"},     // 路径分隔符
+		{"set-default-account", "--dir", dir, "a", "b"},  // 多余参数
+	} {
+		if err := configCommand(args); err == nil {
+			t.Fatalf("config %v 应报错", args)
+		}
+	}
+}
+
+func TestConfigResetClearsDefaultAccount(t *testing.T) {
+	dir := t.TempDir()
+	if err := configCommand([]string{"set-default-account", "--dir", dir, "WenWen12"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := configCommand([]string{"reset", "--dir", dir}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DefaultAccount != "" {
+		t.Fatalf("reset 后 default_account = %q", cfg.DefaultAccount)
+	}
+}
+
 func TestConfigCorruptFileFallsBack(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, config.DirName, config.FileName)

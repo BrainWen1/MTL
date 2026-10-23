@@ -64,6 +64,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  mtl config show --dir <实例目录>")
 	fmt.Fprintln(os.Stderr, "  mtl config set-memory <auto|manual> [--value 4G] --dir <实例目录>")
 	fmt.Fprintln(os.Stderr, "  mtl config set-highperf-gpu <true|false> --dir <实例目录>")
+	fmt.Fprintln(os.Stderr, "  mtl config set-default-account --dir <实例目录> <账号名>（传空字符串解绑）")
 	fmt.Fprintln(os.Stderr, "  mtl config add-jvm-arg|remove-jvm-arg --dir <实例目录> <参数>")
 	fmt.Fprintln(os.Stderr, "  mtl config add-game-arg|remove-game-arg --dir <实例目录> <参数>")
 	fmt.Fprintln(os.Stderr, "  mtl config reset --dir <实例目录>")
@@ -171,7 +172,7 @@ func installPack(packPath, dir string, opts installOptions, out io.Writer) error
 func runInstance(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	dir := fs.String("dir", "", "实例目录（必填）")
-	accountName := fs.String("account", "", "已保存的离线账号；优先于 --username")
+	accountName := fs.String("account", "", "已保存的离线账号；优先于实例默认账号和 --username")
 	username := fs.String("username", "Player", "离线模式用户名；未保存时临时使用")
 	memoryValue := fs.String("memory", memory.DefaultValue, "JVM 最大堆，例如 4G、512M；默认 2G")
 	memoryAuto := fs.Bool("memory-auto", false, "按物理内存自动计算 JVM 最大堆；开启后忽略 --memory")
@@ -243,9 +244,13 @@ func runInstance(args []string) error {
 	}
 
 	store, storeErr := account.OpenDefault()
-	name, uuid, err := selectAccount(*accountName, *username, usernameSet, store, storeErr, os.Stdout, os.Stderr)
+	name, uuid, accountSource, err := selectAccount(*accountName, *username, usernameSet,
+		instanceCfg.DefaultAccount, store, storeErr, os.Stdout, os.Stderr)
 	if err != nil {
 		return err
+	}
+	if *debug {
+		fmt.Fprintf(os.Stdout, "[Config] 账号: %s（来源: %s）\n", name, accountSource)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -384,9 +389,11 @@ func (s *stringList) Set(v string) error {
 	return nil
 }
 
-// selectAccount 解析本次启动使用的离线用户名与 UUID。
-// accountName 非空时优先查已保存账号；storeErr 非空说明账号文件不可用，回退临时账号。
-func selectAccount(accountName, username string, usernameSet bool, store *account.Store, storeErr error, out, errOut io.Writer) (string, string, error) {
+// selectAccount 解析本次启动使用的离线用户名、UUID 与来源。
+// 优先级：--account > 显式 --username > 实例配置 default_account；均未指定时报错。
+// storeErr 非空说明账号文件不可用，回退临时离线账号。
+func selectAccount(accountName, username string, usernameSet bool, defaultAccount string,
+	store *account.Store, storeErr error, out, errOut io.Writer) (name, uuid, source string, err error) {
 	if out == nil {
 		out = io.Discard
 	}
@@ -396,44 +403,62 @@ func selectAccount(accountName, username string, usernameSet bool, store *accoun
 	if storeErr == nil && store == nil {
 		storeErr = errors.New("账号存储不可用")
 	}
-	if storeErr != nil || store == nil {
-		name := username
-		if accountName != "" && !usernameSet {
-			name = accountName
+
+	// --account 与实例默认账号都按“已保存账号”解析；显式 --username 保留原有临时账号能力。
+	choice := config.EffectiveAccount(config.Config{DefaultAccount: defaultAccount}, accountName)
+	savedName := choice.Name
+	source = choice.Source
+	if !choice.Set() {
+		if !usernameSet || username == "" {
+			return "", "", "", errors.New("未指定账号：请使用 --account <账号>，或先执行 mtl config set-default-account 绑定实例默认账号")
 		}
-		if name == "" {
-			name = "Player"
-		}
-		if err := account.ValidateName(name); err != nil {
-			return "", "", fmt.Errorf("账号文件不可用（%v），且回退用户名非法: %w", storeErr, err)
-		}
-		uuid := account.OfflineUUID(name)
-		fmt.Fprintf(errOut, "[Account] 账号文件不可用: %v；回退临时离线账号 %s (%s)\n", storeErr, name, uuid)
-		return name, uuid, nil
+		source = "命令行 --username"
 	}
 
-	if accountName != "" {
-		a, ok := store.Find(accountName)
+	if storeErr != nil || store == nil {
+		fallback := savedName
+		if usernameSet && username != "" {
+			fallback = username
+		}
+		if fallback == "" {
+			fallback = username
+		}
+		if fallback == "" {
+			fallback = "Player"
+		}
+		if err := account.ValidateName(fallback); err != nil {
+			return "", "", "", fmt.Errorf("账号文件不可用（%v），且回退用户名非法: %w", storeErr, err)
+		}
+		uuid = account.OfflineUUID(fallback)
+		fmt.Fprintf(errOut, "[Account] 账号文件不可用: %v；回退临时离线账号 %s (%s)\n", storeErr, fallback, uuid)
+		return fallback, uuid, source, nil
+	}
+
+	if savedName != "" {
+		a, ok := store.Find(savedName)
 		if !ok {
-			return "", "", fmt.Errorf("离线账号 %q 不存在，请先执行: mtl account add %s", accountName, accountName)
+			if source == "实例默认账号" {
+				return "", "", "", fmt.Errorf("实例默认账号 %q 不存在，请先执行: mtl account add %s，或重新执行 mtl config set-default-account 绑定其他账号", savedName, savedName)
+			}
+			return "", "", "", fmt.Errorf("离线账号 %q 不存在，请先执行: mtl account add %s", savedName, savedName)
 		}
 		fmt.Fprintf(out, "[Account] 使用离线账号: %s (%s)\n", a.Name, a.UUID)
-		return a.Name, a.UUID, nil
+		return a.Name, a.UUID, source, nil
 	}
 
 	if username == "" {
 		username = "Player"
 	}
 	if err := account.ValidateName(username); err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	if a, ok := store.Find(username); ok {
 		fmt.Fprintf(out, "[Account] 使用离线账号: %s (%s)\n", a.Name, a.UUID)
-		return a.Name, a.UUID, nil
+		return a.Name, a.UUID, source, nil
 	}
-	uuid := account.OfflineUUID(username)
+	uuid = account.OfflineUUID(username)
 	fmt.Fprintf(out, "[Account] 临时离线账号: %s (%s)\n", username, uuid)
-	return username, uuid, nil
+	return username, uuid, source, nil
 }
 
 func accountCommand(args []string) error {
