@@ -16,8 +16,10 @@ import (
 const shutdownGrace = 10 * time.Second
 
 type Options struct {
-	InstanceDir  string
-	Username     string
+	InstanceDir string
+	Username    string
+	// UUID 为空时按离线算法从 Username 推导；账号模块可传入预计算的离线 UUID。
+	UUID         string
 	ExtraJVMArgs []string
 	Debug        bool
 	Out          io.Writer
@@ -98,7 +100,11 @@ func Run(ctx context.Context, opts Options) error {
 	if username == "" {
 		username = "Player"
 	}
-	jvm, game, err := l.buildArgs(nativeDir, assetsDir, username, opts.ExtraJVMArgs)
+	uuid := opts.UUID
+	if uuid == "" {
+		uuid = offlineUUID(username)
+	}
+	jvm, game, err := l.buildArgs(nativeDir, assetsDir, username, uuid, opts.ExtraJVMArgs)
 	if err != nil {
 		return err
 	}

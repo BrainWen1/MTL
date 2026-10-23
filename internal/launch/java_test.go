@@ -99,6 +99,34 @@ func TestFindJavaRejectsNonExecutable(t *testing.T) {
 	}
 }
 
+func TestRunUsesProvidedUUID(t *testing.T) {
+	exe := buildFakeJava(t)
+	dir := writeTestInstance(t)
+	const uuid = "00000000-0000-3000-8000-000000000000"
+
+	var out bytes.Buffer
+	err := Run(context.Background(), Options{
+		InstanceDir: dir,
+		Username:    "Steve",
+		UUID:        uuid,
+		JavaPath:    exe,
+		AssetsDir:   t.TempDir(),
+		Debug:       true,
+		Out:         &out,
+		ErrOut:      &out,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	log := out.String()
+	if !strings.Contains(log, "--uuid "+uuid) {
+		t.Fatalf("启动命令未使用预计算 UUID:\n%s", log)
+	}
+	if strings.Contains(log, offlineUUID("Steve")) {
+		t.Fatalf("启动命令不应使用按用户名推导的 UUID:\n%s", log)
+	}
+}
+
 func TestRunUsesCustomJavaPath(t *testing.T) {
 	exe := buildFakeJava(t)
 	abs, err := filepath.Abs(exe)

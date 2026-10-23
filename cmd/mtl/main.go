@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"strings"
 
+	"mtl/internal/account"
 	"mtl/internal/assets"
 	"mtl/internal/downloader"
 	"mtl/internal/fabric"
@@ -37,6 +38,8 @@ func run(args []string) error {
 		return runInstance(args[1:])
 	case "inspect":
 		return inspect(args[1:])
+	case "account":
+		return accountCommand(args[1:])
 	case "version":
 		fmt.Println("mtl dev")
 		return nil
@@ -49,8 +52,11 @@ func run(args []string) error {
 func usage() {
 	fmt.Fprintln(os.Stderr, "用法:")
 	fmt.Fprintln(os.Stderr, "  mtl install --dir <实例目录> [--concurrency N] [--skip-loader] <pack.mrpack>")
-	fmt.Fprintln(os.Stderr, "  mtl run --dir <实例目录> [--username <名字>] [--java <java路径>] [--jvm-arg <参数>]... [--debug]")
+	fmt.Fprintln(os.Stderr, "  mtl run --dir <实例目录> [--account <账号>] [--username <名字>] [--java <java路径>] [--jvm-arg <参数>]... [--debug]")
 	fmt.Fprintln(os.Stderr, "  mtl inspect [--extract <dir>] <pack.mrpack>")
+	fmt.Fprintln(os.Stderr, "  mtl account list")
+	fmt.Fprintln(os.Stderr, "  mtl account add <name>")
+	fmt.Fprintln(os.Stderr, "  mtl account rm <name>")
 	fmt.Fprintln(os.Stderr, "  mtl version")
 }
 
@@ -155,7 +161,8 @@ func installPack(packPath, dir string, opts installOptions, out io.Writer) error
 func runInstance(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	dir := fs.String("dir", "", "实例目录（必填）")
-	username := fs.String("username", "Player", "离线模式用户名")
+	accountName := fs.String("account", "", "已保存的离线账号；优先于 --username")
+	username := fs.String("username", "Player", "离线模式用户名；未保存时临时使用")
 	javaPath := fs.String("java", "", "java 可执行文件完整路径；不传则自动使用 Mojang 官方 Java 运行时")
 	debug := fs.Bool("debug", false, "打印完整启动命令")
 	var extraJVM stringList
@@ -163,11 +170,23 @@ func runInstance(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	usernameSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "username" {
+			usernameSet = true
+		}
+	})
 	if fs.NArg() != 0 {
-		return fmt.Errorf("用法: mtl run --dir <实例目录> [--username <名字>] [--java <java路径>] [--jvm-arg <参数>]... [--debug]")
+		return fmt.Errorf("用法: mtl run --dir <实例目录> [--account <账号>] [--username <名字>] [--java <java路径>] [--jvm-arg <参数>]... [--debug]")
 	}
 	if *dir == "" {
 		return fmt.Errorf("必须用 --dir 指定实例目录")
+	}
+
+	store, storeErr := account.OpenDefault()
+	name, uuid, err := selectAccount(*accountName, *username, usernameSet, store, storeErr, os.Stdout, os.Stderr)
+	if err != nil {
+		return err
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -223,7 +242,8 @@ func runInstance(args []string) error {
 
 	err = launch.Run(ctx, launch.Options{
 		InstanceDir:  *dir,
-		Username:     *username,
+		Username:     name,
+		UUID:         uuid,
 		JavaPath:     resolvedJava,
 		AssetsDir:    assetsDir,
 		ExtraJVMArgs: extraJVM,
@@ -243,6 +263,130 @@ func (s *stringList) String() string { return strings.Join(*s, " ") }
 
 func (s *stringList) Set(v string) error {
 	*s = append(*s, v)
+	return nil
+}
+
+// selectAccount 解析本次启动使用的离线用户名与 UUID。
+// accountName 非空时优先查已保存账号；storeErr 非空说明账号文件不可用，回退临时账号。
+func selectAccount(accountName, username string, usernameSet bool, store *account.Store, storeErr error, out, errOut io.Writer) (string, string, error) {
+	if out == nil {
+		out = io.Discard
+	}
+	if errOut == nil {
+		errOut = io.Discard
+	}
+	if storeErr == nil && store == nil {
+		storeErr = errors.New("账号存储不可用")
+	}
+	if storeErr != nil || store == nil {
+		name := username
+		if accountName != "" && !usernameSet {
+			name = accountName
+		}
+		if name == "" {
+			name = "Player"
+		}
+		if err := account.ValidateName(name); err != nil {
+			return "", "", fmt.Errorf("账号文件不可用（%v），且回退用户名非法: %w", storeErr, err)
+		}
+		uuid := account.OfflineUUID(name)
+		fmt.Fprintf(errOut, "[Account] 账号文件不可用: %v；回退临时离线账号 %s (%s)\n", storeErr, name, uuid)
+		return name, uuid, nil
+	}
+
+	if accountName != "" {
+		a, ok := store.Find(accountName)
+		if !ok {
+			return "", "", fmt.Errorf("离线账号 %q 不存在，请先执行: mtl account add %s", accountName, accountName)
+		}
+		fmt.Fprintf(out, "[Account] 使用离线账号: %s (%s)\n", a.Name, a.UUID)
+		return a.Name, a.UUID, nil
+	}
+
+	if username == "" {
+		username = "Player"
+	}
+	if err := account.ValidateName(username); err != nil {
+		return "", "", err
+	}
+	if a, ok := store.Find(username); ok {
+		fmt.Fprintf(out, "[Account] 使用离线账号: %s (%s)\n", a.Name, a.UUID)
+		return a.Name, a.UUID, nil
+	}
+	uuid := account.OfflineUUID(username)
+	fmt.Fprintf(out, "[Account] 临时离线账号: %s (%s)\n", username, uuid)
+	return username, uuid, nil
+}
+
+func accountCommand(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("用法: mtl account <list|add|rm> [name]")
+	}
+	switch args[0] {
+	case "list":
+		return accountList(args[1:])
+	case "add":
+		return accountAdd(args[1:])
+	case "rm":
+		return accountRemove(args[1:])
+	default:
+		return fmt.Errorf("未知 account 子命令 %q（可用: list、add、rm）", args[0])
+	}
+}
+
+func accountList(args []string) error {
+	if len(args) != 0 {
+		return fmt.Errorf("用法: mtl account list")
+	}
+	store, err := account.OpenDefault()
+	if err != nil {
+		return err
+	}
+	list := store.List()
+	if len(list) == 0 {
+		fmt.Println("[Account] 没有离线账号，可用 mtl account add <name> 添加")
+		return nil
+	}
+	fmt.Printf("[Account] 共 %d 个离线账号（%s）\n", len(list), store.Path())
+	for _, a := range list {
+		fmt.Printf("[Account] %-16s %s\n", a.Name, a.UUID)
+	}
+	return nil
+}
+
+func accountAdd(args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("用法: mtl account add <name>")
+	}
+	store, err := account.OpenDefault()
+	if err != nil {
+		return err
+	}
+	a, created, err := store.Add(args[0])
+	if err != nil {
+		return err
+	}
+	if !created {
+		fmt.Printf("[Account] 账号已存在: %s (%s)\n", a.Name, a.UUID)
+		return nil
+	}
+	fmt.Printf("[Account] 已添加: %s (%s)\n", a.Name, a.UUID)
+	return nil
+}
+
+func accountRemove(args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("用法: mtl account rm <name>")
+	}
+	store, err := account.OpenDefault()
+	if err != nil {
+		return err
+	}
+	a, err := store.Remove(args[0])
+	if err != nil {
+		return err
+	}
+	fmt.Printf("[Account] 已删除: %s (%s)\n", a.Name, a.UUID)
 	return nil
 }
 

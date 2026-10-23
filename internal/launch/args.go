@@ -15,7 +15,7 @@ import (
 var placeholderPattern = regexp.MustCompile(`\$\{[^}]+\}`)
 
 // buildArgs 合并 vanilla 与 Fabric profile 的 JVM/游戏参数，并完成占位符替换。
-func (l *Launch) buildArgs(nativesDir, assetsDir, username string, extraJVM []string) (jvm, game []string, err error) {
+func (l *Launch) buildArgs(nativesDir, assetsDir, username, uuid string, extraJVM []string) (jvm, game []string, err error) {
 	cp := l.ClassPath()
 	versionType := l.Vanilla.Type
 	if versionType == "" {
@@ -31,7 +31,7 @@ func (l *Launch) buildArgs(nativesDir, assetsDir, username string, extraJVM []st
 		"game_directory":      l.Dir,
 		"assets_root":         assetsDir,
 		"assets_index_name":   assetsIndex,
-		"auth_uuid":           offlineUUID(username),
+		"auth_uuid":           uuid,
 		"auth_access_token":   "0",
 		"clientid":            "",
 		"auth_xuid":           "",
@@ -73,6 +73,7 @@ func (l *Launch) buildArgs(nativesDir, assetsDir, username string, extraJVM []st
 	jvm = append(jvm, extraJVM...)
 	game = ensureFlag(game, "--gameDir", l.Dir)
 	game = ensureFlag(game, "--username", username)
+	game = ensureFlag(game, "--uuid", uuid)
 	// 使用 mtl 独立缓存目录，不复用其他启动器的 assets。
 	game = ensureFlag(game, "--assetsDir", assetsDir)
 	return jvm, game, nil
@@ -125,7 +126,7 @@ func hasClassPathArg(args []string) bool {
 
 func ensureFlag(args []string, flag, value string) []string {
 	for _, a := range args {
-		if a == flag {
+		if a == flag || strings.HasPrefix(a, flag+"=") {
 			return args
 		}
 	}

@@ -165,7 +165,8 @@ func TestBuildArgs(t *testing.T) {
 	}
 	const natives = "/tmp/natives"
 	assetsDir := filepath.Join(t.TempDir(), "assets")
-	jvm, game, err := l.buildArgs(natives, assetsDir, "Steve", []string{"-Xmx4G"})
+	const uuid = "5627dd98-e6be-3c21-b8a8-e92344183641"
+	jvm, game, err := l.buildArgs(natives, assetsDir, "Steve", uuid, []string{"-Xmx4G"})
 	if err != nil {
 		t.Fatalf("buildArgs: %v", err)
 	}
@@ -186,6 +187,7 @@ func TestBuildArgs(t *testing.T) {
 	joinedGame := strings.Join(game, "\n")
 	for _, want := range []string{
 		"--username\nSteve",
+		"--uuid\n" + uuid,
 		"--gameDir\n" + dir,
 		"--assetsDir\n" + assetsDir,
 		"--accessToken\n0",
