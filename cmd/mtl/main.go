@@ -12,6 +12,7 @@ import (
 
 	"mtl/internal/account"
 	"mtl/internal/assets"
+	"mtl/internal/config"
 	"mtl/internal/downloader"
 	"mtl/internal/fabric"
 	"mtl/internal/launch"
@@ -41,6 +42,8 @@ func run(args []string) error {
 		return inspect(args[1:])
 	case "account":
 		return accountCommand(args[1:])
+	case "config":
+		return configCommand(args[1:])
 	case "version":
 		fmt.Println("mtl dev")
 		return nil
@@ -58,6 +61,11 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  mtl account list")
 	fmt.Fprintln(os.Stderr, "  mtl account add <name>")
 	fmt.Fprintln(os.Stderr, "  mtl account rm <name>")
+	fmt.Fprintln(os.Stderr, "  mtl config show --dir <实例目录>")
+	fmt.Fprintln(os.Stderr, "  mtl config set-memory <auto|manual> [--value 4G] --dir <实例目录>")
+	fmt.Fprintln(os.Stderr, "  mtl config add-jvm-arg|remove-jvm-arg --dir <实例目录> <参数>")
+	fmt.Fprintln(os.Stderr, "  mtl config add-game-arg|remove-game-arg --dir <实例目录> <参数>")
+	fmt.Fprintln(os.Stderr, "  mtl config reset --dir <实例目录>")
 	fmt.Fprintln(os.Stderr, "  mtl version")
 }
 
@@ -193,9 +201,25 @@ func runInstance(args []string) error {
 		return fmt.Errorf("必须用 --dir 指定实例目录")
 	}
 
-	mem, err := resolveMemory(*memoryValue, *memoryAuto, memorySet, os.Stdout, os.Stderr)
+	// 实例配置优先级低于命令行：--memory 覆盖实例内存设置，--memory-auto 强制自动内存。
+	instanceCfg := loadInstanceConfig(*dir)
+	memChoice := config.EffectiveMemory(instanceCfg, *memoryValue, memorySet, *memoryAuto)
+	if *debug {
+		fmt.Fprintf(os.Stdout, "[Config] 实例配置文件: %s\n", configPathForLog(*dir))
+		fmt.Fprintf(os.Stdout, "[Config] 读取到的实例配置:\n%s\n", config.Format(instanceCfg))
+		fmt.Fprintf(os.Stdout, "[Config] 内存来源: %s\n", memChoice.Source)
+	}
+	mem, err := resolveMemory(memChoice.Value, memChoice.Auto, memChoice.ValueSet, os.Stdout, os.Stderr)
 	if err != nil {
 		return err
+	}
+
+	// 配置参数在前，命令行参数追加在后；其余启动流程保持不变。
+	jvmArgs := config.MergeArgs(instanceCfg.JVMArgs, extraJVM)
+	gameArgs := config.MergeArgs(instanceCfg.GameArgs, extraGame)
+	if *debug {
+		fmt.Fprintf(os.Stdout, "[Config] 合并后的 JVM 参数（%d 项）: %q\n", len(jvmArgs), jvmArgs)
+		fmt.Fprintf(os.Stdout, "[Config] 合并后的游戏参数（%d 项）: %q\n", len(gameArgs), gameArgs)
 	}
 
 	store, storeErr := account.OpenDefault()
@@ -262,8 +286,8 @@ func runInstance(args []string) error {
 		JavaPath:      resolvedJava,
 		AssetsDir:     assetsDir,
 		Memory:        mem,
-		ExtraJVMArgs:  extraJVM,
-		ExtraGameArgs: extraGame,
+		ExtraJVMArgs:  jvmArgs,
+		ExtraGameArgs: gameArgs,
 		Debug:         *debug,
 		Out:           os.Stdout,
 		ErrOut:        os.Stderr,
