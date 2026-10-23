@@ -15,6 +15,7 @@ import (
 	"mtl/internal/fabric"
 	"mtl/internal/launch"
 	"mtl/internal/mrpack"
+	"mtl/internal/runtime"
 )
 
 func main() {
@@ -155,7 +156,7 @@ func runInstance(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	dir := fs.String("dir", "", "实例目录（必填）")
 	username := fs.String("username", "Player", "离线模式用户名")
-	javaPath := fs.String("java", "", "java 可执行文件完整路径，默认从 PATH 查找")
+	javaPath := fs.String("java", "", "java 可执行文件完整路径；不传则自动使用 Mojang 官方 Java 运行时")
 	debug := fs.Bool("debug", false, "打印完整启动命令")
 	var extraJVM stringList
 	fs.Var(&extraJVM, "jvm-arg", "追加 JVM 参数，可重复指定")
@@ -176,6 +177,30 @@ func runInstance(args []string) error {
 	if err != nil {
 		return err
 	}
+
+	resolvedJava := *javaPath
+	if resolvedJava == "" {
+		spec := runtime.Spec{}
+		if inst.Vanilla != nil && inst.Vanilla.JavaVersion != nil {
+			spec.Component = inst.Vanilla.JavaVersion.Component
+			spec.MajorVersion = inst.Vanilla.JavaVersion.MajorVersion
+		}
+		resolvedJava, err = runtime.Ensure(ctx, spec, runtime.Options{
+			Progress: func(msg string) {
+				fmt.Fprintf(os.Stdout, "[Runtime] %s\n", msg)
+			},
+		})
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return nil
+			}
+			return err
+		}
+		if *debug {
+			fmt.Fprintf(os.Stdout, "[Runtime] Java 路径: %s\n", resolvedJava)
+		}
+	}
+
 	assetsDir, err := assets.DefaultDir()
 	if err != nil {
 		return err
@@ -199,7 +224,7 @@ func runInstance(args []string) error {
 	err = launch.Run(ctx, launch.Options{
 		InstanceDir:  *dir,
 		Username:     *username,
-		JavaPath:     *javaPath,
+		JavaPath:     resolvedJava,
 		AssetsDir:    assetsDir,
 		ExtraJVMArgs: extraJVM,
 		Debug:        *debug,
