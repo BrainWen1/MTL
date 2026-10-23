@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"strings"
 
+	"mtl/internal/assets"
 	"mtl/internal/downloader"
 	"mtl/internal/fabric"
 	"mtl/internal/launch"
@@ -170,10 +171,36 @@ func runInstance(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	err := launch.Run(ctx, launch.Options{
+
+	inst, err := launch.Load(*dir)
+	if err != nil {
+		return err
+	}
+	assetsDir, err := assets.DefaultDir()
+	if err != nil {
+		return err
+	}
+	if err := assets.Ensure(ctx, assets.IndexSpec{
+		ID:   inst.Vanilla.AssetIndex.ID,
+		URL:  inst.Vanilla.AssetIndex.URL,
+		SHA1: inst.Vanilla.AssetIndex.SHA1,
+		Size: inst.Vanilla.AssetIndex.Size,
+	}, assets.Options{
+		Progress: func(msg string) {
+			fmt.Fprintf(os.Stdout, "[Assets] %s\n", msg)
+		},
+	}); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
+		return err
+	}
+
+	err = launch.Run(ctx, launch.Options{
 		InstanceDir:  *dir,
 		Username:     *username,
 		JavaPath:     *javaPath,
+		AssetsDir:    assetsDir,
 		ExtraJVMArgs: extraJVM,
 		Debug:        *debug,
 		Out:          os.Stdout,

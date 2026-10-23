@@ -30,7 +30,11 @@ type JavaVersion struct {
 }
 
 type AssetIndex struct {
-	ID string `json:"id"`
+	ID        string `json:"id"`
+	SHA1      string `json:"sha1"`
+	Size      int64  `json:"size"`
+	TotalSize int64  `json:"totalSize"`
+	URL       string `json:"url"`
 }
 
 type Download struct {

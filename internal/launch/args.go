@@ -15,7 +15,7 @@ import (
 var placeholderPattern = regexp.MustCompile(`\$\{[^}]+\}`)
 
 // buildArgs 合并 vanilla 与 Fabric profile 的 JVM/游戏参数，并完成占位符替换。
-func (l *Launch) buildArgs(nativesDir, username string, extraJVM []string) (jvm, game []string, err error) {
+func (l *Launch) buildArgs(nativesDir, assetsDir, username string, extraJVM []string) (jvm, game []string, err error) {
 	cp := l.ClassPath()
 	versionType := l.Vanilla.Type
 	if versionType == "" {
@@ -29,7 +29,7 @@ func (l *Launch) buildArgs(nativesDir, username string, extraJVM []string) (jvm,
 		"auth_player_name":    username,
 		"version_name":        l.ProfileID,
 		"game_directory":      l.Dir,
-		"assets_root":         filepath.Join(l.Dir, "assets"),
+		"assets_root":         assetsDir,
 		"assets_index_name":   assetsIndex,
 		"auth_uuid":           offlineUUID(username),
 		"auth_access_token":   "0",
@@ -73,6 +73,8 @@ func (l *Launch) buildArgs(nativesDir, username string, extraJVM []string) (jvm,
 	jvm = append(jvm, extraJVM...)
 	game = ensureFlag(game, "--gameDir", l.Dir)
 	game = ensureFlag(game, "--username", username)
+	// 使用 mtl 独立缓存目录，不复用其他启动器的 assets。
+	game = ensureFlag(game, "--assetsDir", assetsDir)
 	return jvm, game, nil
 }
 

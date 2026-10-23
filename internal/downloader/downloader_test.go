@@ -2,6 +2,7 @@ package downloader
 
 import (
 	"context"
+	"crypto/sha1"
 	"crypto/sha512"
 	"encoding/hex"
 	"errors"
@@ -22,6 +23,11 @@ import (
 
 func sha512Hex(b []byte) string {
 	sum := sha512.Sum512(b)
+	return hex.EncodeToString(sum[:])
+}
+
+func sha1Hex(b []byte) string {
+	sum := sha1.Sum(b)
 	return hex.EncodeToString(sum[:])
 }
 
@@ -358,6 +364,70 @@ func TestDownloadCanceled(t *testing.T) {
 	if err == nil {
 		t.Fatal("已取消的 ctx 应返回错误")
 	}
+}
+
+func TestDownloadSHA1AndSkip(t *testing.T) {
+	body := []byte("asset-bytes")
+	var hits, starts int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+
+	sum := sha1Hex(body)
+	f := mrpack.File{
+		Path:      "objects/ab/" + sum,
+		Hashes:    mrpack.Hashes{SHA1: sum},
+		Downloads: []string{srv.URL + "/a"},
+		FileSize:  int64(len(body)),
+	}
+	dir := t.TempDir()
+	results, err := Download(context.Background(), dir, []mrpack.File{f}, Options{
+		OnStart: func(res Result) { atomic.AddInt32(&starts, 1) },
+	})
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	if results[0].Skipped {
+		t.Fatal("首次下载不应跳过")
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "objects", "ab", sum))
+	if err != nil || string(got) != string(body) {
+		t.Fatalf("文件内容错误: %v, %q", err, got)
+	}
+
+	results, err = Download(context.Background(), dir, []mrpack.File{f}, Options{})
+	if err != nil {
+		t.Fatalf("二次 Download: %v", err)
+	}
+	if !results[0].Skipped {
+		t.Fatal("已存在且 sha1 正确应跳过")
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("请求次数 = %d, want 1", got)
+	}
+	if got := atomic.LoadInt32(&starts); got != 1 {
+		t.Fatalf("OnStart 次数 = %d, want 1（跳过不应触发）", got)
+	}
+}
+
+func TestDownloadSHA1Mismatch(t *testing.T) {
+	srv := serveFiles(t, map[string]string{"/bad": "tampered"})
+	f := mrpack.File{
+		Path:      "objects/ab/deadbeef",
+		Hashes:    mrpack.Hashes{SHA1: sha1Hex([]byte("expected"))},
+		Downloads: []string{srv.URL + "/bad"},
+	}
+	dir := t.TempDir()
+	_, err := Download(context.Background(), dir, []mrpack.File{f}, Options{Retries: -1})
+	if !errors.Is(err, ErrHashMismatch) {
+		t.Fatalf("应返回哈希校验错误: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "objects", "ab", "deadbeef")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatal("校验失败的文件不应落盘")
+	}
+	assertNoTempFiles(t, dir)
 }
 
 func TestDownloadEmptyList(t *testing.T) {

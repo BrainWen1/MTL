@@ -164,7 +164,8 @@ func TestBuildArgs(t *testing.T) {
 		t.Fatalf("load: %v", err)
 	}
 	const natives = "/tmp/natives"
-	jvm, game, err := l.buildArgs(natives, "Steve", []string{"-Xmx4G"})
+	assetsDir := filepath.Join(t.TempDir(), "assets")
+	jvm, game, err := l.buildArgs(natives, assetsDir, "Steve", []string{"-Xmx4G"})
 	if err != nil {
 		t.Fatalf("buildArgs: %v", err)
 	}
@@ -186,6 +187,7 @@ func TestBuildArgs(t *testing.T) {
 	for _, want := range []string{
 		"--username\nSteve",
 		"--gameDir\n" + dir,
+		"--assetsDir\n" + assetsDir,
 		"--accessToken\n0",
 	} {
 		if !strings.Contains(joinedGame, want) {

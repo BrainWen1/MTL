@@ -7,7 +7,10 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
+
+	"mtl/internal/assets"
 )
 
 const shutdownGrace = 10 * time.Second
@@ -21,6 +24,8 @@ type Options struct {
 	ErrOut       io.Writer
 	// JavaPath 为空时使用系统 PATH 中的 java。
 	JavaPath string
+	// AssetsDir 为空时使用 mtl 默认 assets 缓存目录；预留手动覆盖（暂无 CLI 参数）。
+	AssetsDir string
 }
 
 func Run(ctx context.Context, opts Options) error {
@@ -78,11 +83,22 @@ func Run(ctx context.Context, opts Options) error {
 	logf("ClassPath: %d 个 jar（libraries %d，mods %d，client 1）",
 		len(entries), libCount, len(l.Mods))
 
+	assetsDir := opts.AssetsDir
+	if assetsDir == "" {
+		assetsDir, err = assets.DefaultDir()
+		if err != nil {
+			return err
+		}
+	}
+	if assetsDir, err = filepath.Abs(assetsDir); err != nil {
+		return fmt.Errorf("解析 assets 目录失败: %w", err)
+	}
+
 	username := opts.Username
 	if username == "" {
 		username = "Player"
 	}
-	jvm, game, err := l.buildArgs(nativeDir, username, opts.ExtraJVMArgs)
+	jvm, game, err := l.buildArgs(nativeDir, assetsDir, username, opts.ExtraJVMArgs)
 	if err != nil {
 		return err
 	}
