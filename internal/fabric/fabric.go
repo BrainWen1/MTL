@@ -257,6 +257,9 @@ type VanillaResult struct {
 	Skipped       int
 	JavaComponent string
 	JavaMajor     int
+	// VersionJSON 是 Mojang 返回的原版版本 json 原文，供 Forge 等加载器
+	// 在实例中预置 versions/<mc>/<mc>.json。
+	VersionJSON []byte
 }
 
 // EnsureVanilla 只准备原版文件：versions/<mc>/<mc>.json、client jar 和 vanilla libraries。
@@ -344,10 +347,11 @@ func EnsureVanilla(ctx context.Context, instanceDir, gameVersion string, opts Op
 	}
 
 	res := VanillaResult{
-		VersionID:  gameVersion,
-		Files:      len(arts),
-		Downloaded: downloaded,
-		Skipped:    skipped,
+		VersionID:   gameVersion,
+		Files:       len(arts),
+		Downloaded:  downloaded,
+		Skipped:     skipped,
+		VersionJSON: vanillaRaw,
 	}
 	if vanilla.JavaVersion != nil {
 		res.JavaComponent = vanilla.JavaVersion.Component

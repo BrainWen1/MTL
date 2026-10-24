@@ -296,8 +296,12 @@ func runInstance(args []string) error {
 		return err
 	}
 
-	resolvedJava := *javaPath
+	// Java 优先级：命令行 --java > 实例配置 java（需仍真实存在）> 全局缓存自动匹配下载。
+	resolvedJava, javaSource := resolveConfiguredJava(*javaPath, instanceCfg)
 	if resolvedJava == "" {
+		if strings.TrimSpace(instanceCfg.Java) != "" {
+			fmt.Fprintf(os.Stdout, "[run] 实例配置中的 Java 路径已失效，重新自动匹配: %s\n", instanceCfg.Java)
+		}
 		spec := runtime.Spec{}
 		if inst.Vanilla != nil && inst.Vanilla.JavaVersion != nil {
 			spec.Component = inst.Vanilla.JavaVersion.Component
@@ -314,9 +318,11 @@ func runInstance(args []string) error {
 			}
 			return err
 		}
-		if *debug {
-			fmt.Fprintf(os.Stdout, "[Runtime] Java 路径: %s\n", resolvedJava)
-		}
+		javaSource = javaSourceRuntime
+	}
+	fmt.Fprintf(os.Stdout, "[run] Java运行时来源：%s\n", javaSource)
+	if *debug {
+		fmt.Fprintf(os.Stdout, "[Runtime] Java 路径: %s\n", resolvedJava)
 	}
 
 	assetsDir, err := assets.DefaultDir()
@@ -360,6 +366,17 @@ func runInstance(args []string) error {
 		Out:               os.Stdout,
 		ErrOut:            os.Stderr,
 	})
+
+	// 仅在 Java 进程成功运行并正常退出后回填路径；启动失败或中途崩溃保持配置原样。
+	if err == nil {
+		changed, saveErr := persistInstanceJava(*dir, resolvedJava)
+		switch {
+		case saveErr != nil:
+			fmt.Fprintf(os.Stderr, "[run] 警告: 保存Java路径到实例配置失败: %v\n", saveErr)
+		case changed:
+			fmt.Fprintf(os.Stdout, "[run] 已自动保存Java路径到实例配置: %s\n", resolvedJava)
+		}
+	}
 
 	// 游戏进程退出（无论正常还是崩溃）后归档并诊断本次崩溃日志；没有新日志时保持静默。
 	reports, crashWarnings := crash.Collect(crash.Options{InstanceDir: *dir, Baseline: crashBaseline})

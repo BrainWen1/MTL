@@ -154,6 +154,8 @@ mtl run --dir <实例目录> [--account <账号>] [--username <名字>] [--memor
 - JVM 参数顺序为：版本固定参数 → `-Xms / -Xmx` → `--jvm-arg`，因此自定义参数可以覆盖内存配置。
 - `--game-arg` 只拼在主类之后，不会进入 JVM 参数区。
 - 实例配置中的参数在前，命令行追加的参数在后。
+- Java 优先级：`--java` > 实例配置 `java` > 全局缓存自动匹配下载。配置中的路径被手动删除时会自动重新匹配。
+- 游戏成功运行结束后，本次使用的 Java 绝对路径会自动回填到实例配置（与已有值相同则跳过）；启动失败或中途崩溃不会修改配置。
 - `Ctrl+C` 会转发给游戏进程；10 秒内未退出则强制结束。
 
 ### mtl inspect
@@ -322,7 +324,8 @@ Linux / macOS：`~/.cache/mtl/` 下为相同结构。
   "jvm_args": [],
   "game_args": [],
   "prefer_high_perf_gpu": false,
-  "default_account": ""
+  "default_account": "",
+  "java": ""
 }
 ```
 
@@ -334,6 +337,7 @@ Linux / macOS：`~/.cache/mtl/` 下为相同结构。
 | `game_args` | string[] | 追加的游戏参数，只排在主类之后 |
 | `prefer_high_perf_gpu` | bool | 是否启用高性能显卡调度，仅 Windows 生效，默认 `false` |
 | `default_account` | string | 实例默认离线账号名；空字符串表示未绑定 |
+| `java` | string | 上次成功启动使用的 Java 可执行文件绝对路径；空表示自动匹配。路径失效时自动重新匹配 |
 
 补充说明：
 

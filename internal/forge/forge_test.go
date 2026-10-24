@@ -1,9 +1,11 @@
 package forge
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -137,7 +139,8 @@ func TestCleanupNewVersionDirs(t *testing.T) {
 }
 
 // mockForgeServer 提供原版清单、client jar 与 Forge Maven installer。
-func mockForgeServer(t *testing.T) *httptest.Server {
+// 第二个返回值是原版版本 json 原文，便于断言实例中的文件与其一致。
+func mockForgeServer(t *testing.T) (*httptest.Server, []byte) {
 	t.Helper()
 	const (
 		clientJar = "client-jar"
@@ -168,7 +171,7 @@ func mockForgeServer(t *testing.T) *httptest.Server {
 	installerPath := "/maven/net/minecraftforge/forge/1.20.1-47.1.0/forge-1.20.1-47.1.0-installer.jar"
 	routes[installerPath] = func() []byte { return []byte(installer) }
 	routes[installerPath+".sha1"] = func() []byte { return []byte(sha1Hex(installer)) }
-	return srv
+	return srv, versionJSON
 }
 
 func testForgeOptions(t *testing.T, srv *httptest.Server) Options {
@@ -195,7 +198,7 @@ func writeVersionJSON(t *testing.T, dir, id, body string) {
 }
 
 func TestInstallWithMockedInstaller(t *testing.T) {
-	srv := mockForgeServer(t)
+	srv, vanillaJSON := mockForgeServer(t)
 	opts := testForgeOptions(t, srv)
 	var msgs []string
 	opts.Progress = func(msg string) { msgs = append(msgs, msg) }
@@ -218,6 +221,16 @@ func TestInstallWithMockedInstaller(t *testing.T) {
 		}
 		if got, err := os.ReadFile(installerPath); err != nil || string(got) != "forge-installer-jar" {
 			t.Errorf("installer 内容异常: %q, %v", got, err)
+		}
+		// installer 启动前，实例中必须已有 Mojang 原版版本 json 与 launcher_profiles.json。
+		vanillaPath := filepath.Join(instanceDir, "versions", "1.20.1", "1.20.1.json")
+		if got, err := os.ReadFile(vanillaPath); err != nil {
+			t.Errorf("installer 前缺少原版版本 json: %v", err)
+		} else if !bytes.Equal(got, vanillaJSON) {
+			t.Errorf("原版版本 json 必须保持 Mojang 原文，got %q", got)
+		}
+		if _, err := os.Stat(filepath.Join(instanceDir, "launcher_profiles.json")); err != nil {
+			t.Errorf("installer 前缺少 launcher_profiles.json: %v", err)
 		}
 		writeVersionJSON(t, instanceDir, "1.20.1-forge-47.1.0", profileJSON)
 		return "installer ok", nil
@@ -270,7 +283,7 @@ func TestInstallWithMockedInstaller(t *testing.T) {
 }
 
 func TestInstallCleansUpOnInstallerFailure(t *testing.T) {
-	srv := mockForgeServer(t)
+	srv, _ := mockForgeServer(t)
 	opts := testForgeOptions(t, srv)
 	ld, err := NewLoader("1.20.1", opts)
 	if err != nil {
@@ -348,6 +361,87 @@ func TestEnsureProfileLibrariesRepairsMissingFiles(t *testing.T) {
 	}
 	if got, err := os.ReadFile(target); err != nil || string(got) != body {
 		t.Fatalf("修复后库文件 = %q, %v", got, err)
+	}
+}
+
+func TestEnsureVanillaProfileWritesOriginalAndSkipsIdentical(t *testing.T) {
+	dir := t.TempDir()
+	var msgs []string
+	ld := &Loader{opts: Options{Progress: func(msg string) { msgs = append(msgs, msg) }}}
+	raw := []byte(`{"id":"1.20.1","mainClass":"net.minecraft.client.main.Main"}`)
+
+	if err := ld.ensureVanillaProfile(dir, "1.20.1", raw); err != nil {
+		t.Fatalf("ensureVanillaProfile: %v", err)
+	}
+	p := filepath.Join(dir, "versions", "1.20.1", "1.20.1.json")
+	if got, err := os.ReadFile(p); err != nil || !bytes.Equal(got, raw) {
+		t.Fatalf("原版 json 未按原文写入: %q, %v", got, err)
+	}
+	if joined := strings.Join(msgs, "\n"); !strings.Contains(joined, "写入原版vanilla profile json") {
+		t.Fatalf("缺少写入日志:\n%s", joined)
+	}
+
+	msgs = nil
+	if err := ld.ensureVanillaProfile(dir, "1.20.1", raw); err != nil {
+		t.Fatalf("二次 ensureVanillaProfile: %v", err)
+	}
+	if joined := strings.Join(msgs, "\n"); !strings.Contains(joined, "跳过") {
+		t.Fatalf("内容一致时应跳过写入:\n%s", joined)
+	}
+
+	// 内容变化时应覆盖旧文件。
+	updated := []byte(`{"id":"1.20.1","mainClass":"changed"}`)
+	if err := ld.ensureVanillaProfile(dir, "1.20.1", updated); err != nil {
+		t.Fatalf("更新 ensureVanillaProfile: %v", err)
+	}
+	if got, err := os.ReadFile(p); err != nil || !bytes.Equal(got, updated) {
+		t.Fatalf("原版 json 未更新: %q, %v", got, err)
+	}
+}
+
+func TestEnsureVanillaProfileRejectsEmptyAndReportsWriteFailure(t *testing.T) {
+	ld := &Loader{}
+	dir := t.TempDir()
+	if err := ld.ensureVanillaProfile(dir, "1.20.1", nil); err == nil {
+		t.Fatal("空版本 json 应报错")
+	}
+	// 用同名文件占住 versions 目录，令写入失败。
+	if err := os.WriteFile(filepath.Join(dir, "versions"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ld.ensureVanillaProfile(dir, "1.20.1", []byte(`{"id":"1.20.1"}`)); err == nil {
+		t.Fatal("写入失败应返回错误")
+	}
+}
+
+func TestEnsureLauncherProfilesCreatesOnlyWhenMissing(t *testing.T) {
+	dir := t.TempDir()
+	ld := &Loader{}
+	if err := ld.ensureLauncherProfiles(dir); err != nil {
+		t.Fatalf("创建 launcher_profiles.json: %v", err)
+	}
+	p := filepath.Join(dir, "launcher_profiles.json")
+	var doc map[string]any
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("launcher_profiles.json 不是合法 JSON: %v", err)
+	}
+	if _, ok := doc["profiles"]; !ok {
+		t.Fatalf("launcher_profiles.json 缺少 profiles: %s", raw)
+	}
+
+	custom := []byte(`{"profiles":{"keep":{}},"settings":{},"version":3}`)
+	if err := os.WriteFile(p, custom, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ld.ensureLauncherProfiles(dir); err != nil {
+		t.Fatalf("二次 ensureLauncherProfiles: %v", err)
+	}
+	if got, err := os.ReadFile(p); err != nil || !bytes.Equal(got, custom) {
+		t.Fatalf("已存在的 launcher_profiles.json 不应被覆盖: %q, %v", got, err)
 	}
 }
 

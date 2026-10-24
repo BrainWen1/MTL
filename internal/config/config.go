@@ -44,6 +44,10 @@ type Config struct {
 	// 旧版本实例没有这两个字段，读取后为空，由 launch 按 profile id 兼容推断。
 	LoaderType    string `json:"loader_type"`
 	LoaderVersion string `json:"loader_version"`
+	// Java 是上次成功启动时使用的 Java 可执行文件绝对路径。
+	// 只绑定路径，Java 运行时本体仍存放在全局缓存中供各实例共享。
+	// 下次 run 会优先复用；文件被手动删除时视为失效并重新自动匹配。
+	Java string `json:"java"`
 }
 
 // Default 返回配置文件缺失或损坏时使用的默认配置：自动内存、无自定义参数、
@@ -184,6 +188,7 @@ func normalize(cfg Config) (Config, error) {
 	cfg.DefaultAccount = strings.TrimSpace(cfg.DefaultAccount)
 	cfg.LoaderType = strings.ToLower(strings.TrimSpace(cfg.LoaderType))
 	cfg.LoaderVersion = strings.TrimSpace(cfg.LoaderVersion)
+	cfg.Java = strings.TrimSpace(cfg.Java)
 	if err := ValidateDefaultAccount(cfg.DefaultAccount); err != nil {
 		return Default(), err
 	}

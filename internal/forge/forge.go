@@ -133,6 +133,15 @@ func (l *Loader) Install(ctx context.Context, inst *config.Instance) error {
 		return err
 	}
 
+	// Forge installer 会读取实例中的原版版本 json 与 launcher_profiles.json，
+	// 必须在拉起 installer 之前准备好，否则报 "There is no minecraft launcher profile"。
+	if err := l.ensureVanillaProfile(instanceDir, mcVersion, vanilla.VersionJSON); err != nil {
+		return err
+	}
+	if err := l.ensureLauncherProfiles(instanceDir); err != nil {
+		return err
+	}
+
 	before, err := listVersionIDs(instanceDir)
 	if err != nil {
 		return err
