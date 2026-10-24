@@ -53,6 +53,8 @@ func run(args []string) error {
 		return accountCommand(args[1:])
 	case "config":
 		return configCommand(args[1:])
+	case "mod":
+		return modCommand(args[1:])
 	case "version":
 		fmt.Println("mtl dev")
 		return nil
@@ -83,6 +85,8 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  mtl config reset --dir <实例目录>")
 	fmt.Fprintln(os.Stderr, "  mtl config global（显示全局配置路径与内容）")
 	fmt.Fprintln(os.Stderr, "  mtl config set-mirror <mojang|assets|libraries|version-meta|mod|fabric|forge> <镜像地址>")
+	fmt.Fprintln(os.Stderr, "  mtl mod list --dir <实例目录> [--debug]")
+	fmt.Fprintln(os.Stderr, "  mtl mod enable|disable|rm <mod-id/文件名> --dir <实例目录>")
 	fmt.Fprintln(os.Stderr, "  mtl version")
 }
 

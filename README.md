@@ -24,6 +24,7 @@ MTL 是自用项目，不是成熟的发行版启动器。功能按实际需要�
 - **崩溃日志归档与诊断**：每次启动后自动归档新增崩溃日志，并用离线关键词规则给出 Mod 冲突提示。
 - **整合包查看**：`mtl inspect` 可在安装前查看整合包信息，按需解压 overrides。
 - **实例列表与健康检查**：`mtl list` 只读扫描实例根目录，用表格展示加载器、默认账号和 Java 状态；`mtl info` 展示完整配置与健康检查报告。
+- **本地 Mod 管理**：`mtl mod list|enable|disable|rm` 离线读取 Fabric / Forge 元数据（含嵌套 jar 子模块），展示名称、版本、id、加载器与依赖；禁用只把 jar 移动到 `mods/disabled/`，不修改文件内容，可随时恢复。
 
 ## ⚠️ 当前已知限制
 
@@ -35,7 +36,7 @@ MTL 是自用项目，不是成熟的发行版启动器。功能按实际需要�
 - 增量清理只识别 mrpack 安装写入 `.mtl/pack-lock.json` 的托管文件；旧实例首次重新安装不会清理历史文件，只会从本次安装开始建立锁定清单。
 - 纯净模板实例不生成 pack-lock，也不参与整合包清理；其中的 mod、配置与存档完全由用户手动管理。
 - 清理前会校验文件哈希，用户修改过的旧托管文件会保留；`saves/` 与 `.mtl/` 永远不参与清理。
-- 没有图形界面、皮肤/披风、Mod 管理、自动更新等启动器周边功能。
+- 没有图形界面、皮肤/披风、在线 Mod 市场、自动更新等启动器周边功能。
 - Linux arm64 没有 Mojang 官方 Java 运行时，需要 `--java` 指定本机 Java。
 
 ## 📦 前置要求
@@ -320,6 +321,50 @@ mtl info <实例名> [--dir <实例根目录>]
 - mrpack 实例的元信息会展示整合包版本、`.mtl/pack-lock.json` 是否存在及托管文件数量、整合包来源；锁定清单损坏时显示读取失败，不影响其他检查。
 - 纯净模板实例标记为「手动纯净模板」，不展示 pack-lock 相关信息。
 
+### mtl mod
+
+管理单个实例的本地 mod：查看元数据、启用/禁用与删除。模板实例（`install_mode=template`）与 mrpack 整合包实例均可使用。
+
+```bash
+mtl mod list --dir <实例目录> [--debug]
+mtl mod enable <mod-id|文件名> --dir <实例目录>
+mtl mod disable <mod-id|文件名> --dir <实例目录>
+mtl mod rm <mod-id|文件名> --dir <实例目录>
+```
+
+| 子命令 | 说明 |
+| --- | --- |
+| `list` | 列出 `mods/` 与 `mods/disabled/` 下的所有 mod，区分启用/禁用 |
+| `enable` | 把禁用目录中的 mod 移回 `mods/` |
+| `disable` | 把 mod 移动到 `mods/disabled/`，不修改 jar 内容 |
+| `rm` | 删除 mod 文件；启用或禁用状态均可删除 |
+
+| 参数 | 说明 |
+| --- | --- |
+| `--dir <目录>` | 必填，实例目录 |
+| `--debug` | 在表格之后输出完整元数据（版本约束、可选依赖、嵌套模块等） |
+| `<mod-id\|文件名>` | mod id、`xxx.jar` 或不带后缀的文件名；均忽略大小写 |
+
+示例：
+
+```bash
+./mtl mod list --dir ./instances/demo
+./mtl mod list --dir ./instances/demo --debug
+./mtl mod disable sodium --dir ./instances/demo
+./mtl mod enable sodium-fabric-0.5.0.jar --dir ./instances/demo
+./mtl mod rm "some-unknown-mod.jar" --dir ./instances/demo
+```
+
+输出与校验说明：
+
+- 默认输出简洁表格：状态、MOD ID、名称、版本、加载器、依赖、文件；`--debug` 追加每个 mod 的完整元数据。
+- 元数据读取优先级：`fabric.mod.json` > `META-INF/neoforge.mods.toml` > `META-INF/mods.toml`。缺失或解析失败时显示「未知mod」，不中断列表。
+- 会读取 `META-INF/jars/` 中的嵌套模块（例如 Fabric API 的子模块），避免把包内模块误报为缺失依赖。
+- 以下情况在 `list` 末尾输出警告，但不阻断命令：重复 mod id、加载器与实例不匹配、启用中的 mod 缺少必需前置、前置已安装但被禁用。
+- 校验完全离线：只读取本地 jar，不联网、不校验签名，也不判断 Mod 版本约束是否真正满足。
+- 禁用通过文件移动实现，jar 内容保持不变；`mods/disabled/` 属于用户手动状态，mrpack 增量清理永远不会删除或移动其中的文件。
+- `enable` / `disable` 可安全重复执行；目标位置已存在同名文件时会报错，不会覆盖已有 mod。
+
 ### mtl account
 
 管理全局离线账号。
@@ -472,6 +517,7 @@ instances/
     ├── crash_reports/           # MTL 归档的崩溃日志（下划线）
     ├── crash-reports/           # Minecraft 原版生成的崩溃日志（连字符，崩溃后出现）
     ├── mods/                    # 整合包 mod
+    │   └── disabled/            # mtl mod disable 移动到此，jar 内容不变
     ├── config/                  # 整合包自带配置
     ├── libraries/               # 游戏库与 Fabric / Forge loader 库
     ├── versions/                # 原版版本 json/jar 与加载器 profile
@@ -634,16 +680,17 @@ go test ./...
    - 写入 `install_mode=template`，不生成 pack-lock；`mtl info` 标记为手动纯净模板。
    - 验收：空目录安装 1.20.1 原版、Fabric、Forge 后均可直接 `mtl run`。
 
-3. **下载断点续传与镜像源**
+3. ✅ **下载断点续传与镜像源**
    - 单文件 `Range` 续传（`.part` 临时文件），重试不再从头下载。
    - 全局配置 Mojang / Fabric / Forge Maven / Modrinth 下载源，支持环境变量或全局配置文件覆盖；镜像失败自动回退官方。
    - 验收：下载中断后重新执行可从断点继续；镜像不可用时仍能完成安装。
 
 ### P1 — 日常管理能力
 
-4. **本地 Mod 管理**
-   - `mtl mod list|enable|disable|rm`：离线读取 `fabric.mod.json` / `META-INF/mods.toml`，展示名称、版本、加载器。
-   - 离线检测重复 Mod、加载器不匹配、缺失前置；禁用通过移动文件实现，可随时恢复。
+4. ✅ **本地 Mod 管理（已实现）**
+   - `mtl mod list|enable|disable|rm`：离线读取 `fabric.mod.json` / `META-INF/mods.toml`（含 `META-INF/jars/` 嵌套模块），展示名称、版本、id、加载器与依赖。
+   - 离线检测重复 Mod、加载器不匹配、缺失前置；禁用通过移动到 `mods/disabled/` 实现，不修改 jar，可随时恢复。
+   - mrpack 增量清理会跳过 `mods/disabled/`，不会删除用户手动禁用的 mod。
 5. **Java 运行时管理**
    - `mtl java list|use|prune`：查看缓存运行时、手动登记本机 Java、清理未使用版本。
    - 与现有实例 `java` 字段、`--java` 优先级保持一致。

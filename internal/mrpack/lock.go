@@ -235,6 +235,28 @@ func IsProtectedPath(rel string) bool {
 	}
 }
 
+// DisabledModRelPath 是 `mtl mod disable` 存放已禁用 mod 的目录。
+const DisabledModRelPath = "mods/disabled"
+
+// IsDisabledModPath 判断相对路径是否位于 mods/disabled/ 下（大小写不敏感）。
+// 该目录属于用户手动状态，整合包增量清理永远不应触碰。
+func IsDisabledModPath(rel string) bool {
+	parts := strings.Split(rel, "/")
+	return len(parts) >= 2 &&
+		strings.EqualFold(parts[0], "mods") &&
+		strings.EqualFold(parts[1], "disabled")
+}
+
+// disabledModCounterpart 把 mods/x.jar 映射为 mods/disabled/x.jar。
+// 仅对 mods 根目录的单层文件生效，用于识别被手动移动到禁用目录的托管文件。
+func disabledModCounterpart(rel string) (string, bool) {
+	parts := strings.Split(rel, "/")
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "mods") || parts[1] == "" {
+		return "", false
+	}
+	return DisabledModRelPath + "/" + parts[1], true
+}
+
 // Diff 描述新旧托管文件清单的差异，路径均按字典序排列。
 type Diff struct {
 	Added   []string
@@ -313,6 +335,11 @@ func PlanPrune(dir string, old *Lock, desired map[string]string) PrunePlan {
 			plan.Keep = append(plan.Keep, KeptFile{Path: rel, Reason: "受保护路径"})
 			continue
 		}
+		// mods/disabled/ 是用户手动禁用的 mod，不属于整合包托管状态的清理范围。
+		if IsDisabledModPath(rel) {
+			plan.Keep = append(plan.Keep, KeptFile{Path: rel, Reason: "手动禁用的 mod"})
+			continue
+		}
 		full, err := SafeJoin(dir, rel)
 		if err != nil {
 			plan.Keep = append(plan.Keep, KeptFile{Path: rel, Reason: "路径非法"})
@@ -320,7 +347,15 @@ func PlanPrune(dir string, old *Lock, desired map[string]string) PrunePlan {
 		}
 		info, err := os.Lstat(full)
 		if errors.Is(err, fs.ErrNotExist) {
-			// 已经不存在，无需删除也不算保留。
+			// 文件已不在原位；若同名文件位于 mods/disabled/，说明用户手动禁用了它，
+			// 记录保留原因但不纳入清理，避免后续重复安装时误删用户的禁用状态。
+			if disabledRel, ok := disabledModCounterpart(rel); ok {
+				if disabledFull, joinErr := SafeJoin(dir, disabledRel); joinErr == nil {
+					if _, statErr := os.Lstat(disabledFull); statErr == nil {
+						plan.Keep = append(plan.Keep, KeptFile{Path: rel, Reason: "mod 已被手动禁用"})
+					}
+				}
+			}
 			continue
 		}
 		if err != nil {
@@ -351,6 +386,10 @@ func PlanPrune(dir string, old *Lock, desired map[string]string) PrunePlan {
 func ApplyPrune(dir string, files []string) (int, error) {
 	deleted := 0
 	for _, rel := range files {
+		// 双重保护：即使调用方传入禁用目录路径，也绝不删除。
+		if IsDisabledModPath(rel) {
+			continue
+		}
 		full, err := SafeJoin(dir, rel)
 		if err != nil {
 			return deleted, fmt.Errorf("待删除文件 %q 路径非法: %w", rel, err)

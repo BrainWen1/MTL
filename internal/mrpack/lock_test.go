@@ -245,6 +245,69 @@ func TestPlanPruneProtectsUserFiles(t *testing.T) {
 	}
 }
 
+func TestIsDisabledModPath(t *testing.T) {
+	disabled := []string{
+		"mods/disabled/a.jar",
+		"Mods/Disabled/A.jar",
+		"mods/DISABLED/sub/a.jar",
+	}
+	for _, p := range disabled {
+		if !IsDisabledModPath(p) {
+			t.Errorf("%q 应识别为禁用目录", p)
+		}
+	}
+	open := []string{
+		"mods/a.jar",
+		"mods/disabled.txt",
+		"disabled/a.jar",
+		"config/disabled/a.toml",
+		"mods",
+	}
+	for _, p := range open {
+		if IsDisabledModPath(p) {
+			t.Errorf("%q 不应识别为禁用目录", p)
+		}
+	}
+}
+
+func TestPlanPruneKeepsDisabledMods(t *testing.T) {
+	dir := t.TempDir()
+	disabledBody := writeInstanceFile(t, dir, "mods/disabled/other.jar", "manual")
+	movedBody := writeInstanceFile(t, dir, "mods/disabled/manual.jar", "moved")
+
+	// mods/manual.jar 已不在原位，但同名文件位于 mods/disabled/，说明用户手动禁用了它。
+	// mods/disabled/other.jar 直接出现在旧清单中时也必须保留。
+	old := &Lock{Files: map[string]string{
+		"mods/manual.jar":         testHash("a"),
+		"mods/disabled/other.jar": testHash("b"),
+	}}
+	plan := PlanPrune(dir, old, map[string]string{})
+	if len(plan.Delete) != 0 {
+		t.Fatalf("禁用目录不应进入清理计划: %+v", plan.Delete)
+	}
+	reasons := map[string]string{}
+	for _, k := range plan.Keep {
+		reasons[k.Path] = k.Reason
+	}
+	if reasons["mods/manual.jar"] != "mod 已被手动禁用" {
+		t.Errorf("移动后的 mod 应保留，got %+v", plan.Keep)
+	}
+	if reasons["mods/disabled/other.jar"] != "手动禁用的 mod" {
+		t.Errorf("禁用目录应受保护，got %+v", plan.Keep)
+	}
+
+	// 双重保护：即使调用方显式传入禁用路径，ApplyPrune 也不能删除。
+	deleted, err := ApplyPrune(dir, []string{"mods/disabled/other.jar"})
+	if err != nil || deleted != 0 {
+		t.Fatalf("ApplyPrune = %d, %v", deleted, err)
+	}
+	for _, path := range []string{disabledBody, movedBody} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("%s 不应被删除: %v", path, err)
+		}
+	}
+}
+
 func hashOfStringTest(t *testing.T, body string) string {
 	t.Helper()
 	dir := t.TempDir()
