@@ -51,6 +51,12 @@ func resolveConfiguredJava(cliJava string, cfg config.Config) (path, source stri
 	return "", ""
 }
 
+// shouldPersistJava 报告本次 Java 来源是否允许在游戏成功结束后回填配置。
+// 命令行 --java 只对本次启动生效，不写入配置；实例配置与全局缓存来源允许回填。
+func shouldPersistJava(source string) bool {
+	return source != javaSourceCLI
+}
+
 // persistInstanceJava 在游戏成功运行后把本次使用的 Java 绝对路径回填到实例配置。
 // 与配置中已有值完全一致时不写文件（幂等）。写入前重新读取配置，
 // 避免覆盖游戏运行期间通过 config 子命令产生的其他修改。

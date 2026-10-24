@@ -66,6 +66,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  mtl account rm <name>")
 	fmt.Fprintln(os.Stderr, "  mtl config show --dir <实例目录>")
 	fmt.Fprintln(os.Stderr, "  mtl config set-memory <auto|manual> [--value 4G] --dir <实例目录>")
+	fmt.Fprintln(os.Stderr, "  mtl config set-java <实例目录> [java路径]（省略路径表示清空，恢复自动匹配）")
 	fmt.Fprintln(os.Stderr, "  mtl config set-highperf-gpu <true|false> --dir <实例目录>")
 	fmt.Fprintln(os.Stderr, "  mtl config set-default-account --dir <实例目录> <账号名>（传空字符串解绑）")
 	fmt.Fprintln(os.Stderr, "  mtl config add-jvm-arg|remove-jvm-arg --dir <实例目录> <参数>")
@@ -368,7 +369,8 @@ func runInstance(args []string) error {
 	})
 
 	// 仅在 Java 进程成功运行并正常退出后回填路径；启动失败或中途崩溃保持配置原样。
-	if err == nil {
+	// --java 为命令行临时覆盖，不写入实例配置。
+	if err == nil && shouldPersistJava(javaSource) {
 		changed, saveErr := persistInstanceJava(*dir, resolvedJava)
 		switch {
 		case saveErr != nil:

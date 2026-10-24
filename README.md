@@ -155,7 +155,8 @@ mtl run --dir <实例目录> [--account <账号>] [--username <名字>] [--memor
 - `--game-arg` 只拼在主类之后，不会进入 JVM 参数区。
 - 实例配置中的参数在前，命令行追加的参数在后。
 - Java 优先级：`--java` > 实例配置 `java` > 全局缓存自动匹配下载。配置中的路径被手动删除时会自动重新匹配。
-- 游戏成功运行结束后，本次使用的 Java 绝对路径会自动回填到实例配置（与已有值相同则跳过）；启动失败或中途崩溃不会修改配置。
+- 游戏成功运行结束后，本次自动匹配或实例配置选中的 Java 绝对路径会回填到实例配置（与已有值相同则跳过）；启动失败或中途崩溃不会修改配置。
+- `--java` 只对本次启动临时生效，不会写入实例配置。
 - `Ctrl+C` 会转发给游戏进程；10 秒内未退出则强制结束。
 
 ### mtl inspect
@@ -215,6 +216,7 @@ mtl account rm <name>
 ```bash
 mtl config show --dir <实例目录>
 mtl config set-memory <auto|manual> [--value <内存>] --dir <实例目录>
+mtl config set-java <实例目录> [java路径]（省略路径表示清空）
 mtl config set-highperf-gpu <true|false> --dir <实例目录>
 mtl config set-default-account --dir <实例目录> <账号名>
 mtl config add-jvm-arg --dir <实例目录> <参数>
@@ -229,6 +231,7 @@ mtl config reset --dir <实例目录>
 | `show` | 打印当前实例配置 |
 | `set-memory auto` | 使用自动内存模式 |
 | `set-memory manual --value 4G` | 使用手动内存，`--value` 必填 |
+| `set-java <java路径>` | 校验并写入实例 Java 路径，不启动游戏；省略路径表示清空并恢复自动匹配 |
 | `set-highperf-gpu true` | 开启实例级高性能显卡调度（仅 Windows 生效） |
 | `set-highperf-gpu false` | 关闭实例级高性能显卡调度 |
 | `set-default-account <账号名>` | 绑定实例默认离线账号；只保存名字，不校验账号是否存在 |
@@ -244,6 +247,8 @@ mtl config reset --dir <实例目录>
 ./mtl config show --dir ./instances/demo
 ./mtl config set-memory manual --value 6G --dir ./instances/demo
 ./mtl config set-memory auto --dir ./instances/demo
+./mtl config set-java ./instances/demo "C:\Java\jdk-21\bin\java.exe"
+./mtl config set-java ./instances/demo          # 清空，恢复自动匹配
 ./mtl config set-highperf-gpu true --dir ./instances/demo
 ./mtl config set-default-account --dir ./instances/demo Steve
 ./mtl config add-jvm-arg --dir ./instances/demo "-XX:+UseG1GC"

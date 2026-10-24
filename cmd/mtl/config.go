@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -8,13 +9,14 @@ import (
 	"strings"
 
 	"mtl/internal/config"
+	"mtl/internal/launch"
 	"mtl/internal/memory"
 )
 
 // configCommand 处理 mtl config 子命令。配置存放于 <实例目录>/.mtl/config.json。
 func configCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("用法: mtl config <show|set-memory|set-highperf-gpu|set-default-account|add-jvm-arg|remove-jvm-arg|add-game-arg|remove-game-arg|reset> ...")
+		return fmt.Errorf("用法: mtl config <show|set-memory|set-java|set-highperf-gpu|set-default-account|add-jvm-arg|remove-jvm-arg|add-game-arg|remove-game-arg|reset> ...")
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
@@ -22,6 +24,8 @@ func configCommand(args []string) error {
 		return configShow(rest)
 	case "set-memory":
 		return configSetMemory(rest)
+	case "set-java":
+		return configSetJava(rest)
 	case "set-highperf-gpu":
 		return configSetHighPerfGPU(rest)
 	case "set-default-account":
@@ -37,7 +41,7 @@ func configCommand(args []string) error {
 	case "reset":
 		return configReset(rest)
 	default:
-		return fmt.Errorf("未知 config 子命令 %q（可用: show、set-memory、set-highperf-gpu、set-default-account、add-jvm-arg、remove-jvm-arg、add-game-arg、remove-game-arg、reset）", sub)
+		return fmt.Errorf("未知 config 子命令 %q（可用: show、set-memory、set-java、set-highperf-gpu、set-default-account、add-jvm-arg、remove-jvm-arg、add-game-arg、remove-game-arg、reset）", sub)
 	}
 }
 
@@ -142,6 +146,59 @@ func configSetMemory(args []string) error {
 	} else {
 		fmt.Printf("[Config] 已设置手动内存 %s: %s\n", cfg.ManualMemory, configPathForLog(dir))
 	}
+	return nil
+}
+
+// configSetJava 设置或清空实例绑定的 Java 可执行文件路径。
+// 用法：mtl config set-java <实例目录> [java路径]
+// 省略路径时清空 java 字段，恢复全局缓存自动匹配。
+// 该命令只修改配置，不会启动游戏，也不触发 run 的成功回填逻辑。
+// 同时兼容其他 config 子命令的 --dir 写法。
+func configSetJava(args []string) error {
+	dir, _, positional, err := parseConfigArgs(args)
+	if err != nil {
+		return err
+	}
+	if dir == "" {
+		if len(positional) == 0 {
+			return errors.New("用法: mtl config set-java <实例目录> [java路径]（省略路径表示清空）")
+		}
+		dir, positional = positional[0], positional[1:]
+	}
+	if len(positional) > 1 {
+		return errors.New("用法: mtl config set-java <实例目录> [java路径]（省略路径表示清空）")
+	}
+
+	cfg := loadInstanceConfig(dir)
+
+	// 未提供路径：清空 java 字段，下次 run 重新进入自动匹配。
+	if len(positional) == 0 {
+		if cfg.Java == "" {
+			fmt.Printf("[Config] 实例未设置 Java 路径，已是自动匹配模式: %s\n", configPathForLog(dir))
+			return nil
+		}
+		cfg.Java = ""
+		if err := config.Save(dir, cfg); err != nil {
+			return err
+		}
+		fmt.Printf("[Config] 已清空 Java 路径，恢复自动匹配: %s\n", configPathForLog(dir))
+		return nil
+	}
+
+	// 复用 run 的校验逻辑：路径存在、可执行，且能响应 -version。
+	javaPath, err := launch.ValidateJavaPath(context.Background(), positional[0])
+	if err != nil {
+		return fmt.Errorf("Java 路径校验失败: %w", err)
+	}
+	if cfg.Java == javaPath {
+		fmt.Printf("[Config] 实例 Java 路径已是 %s，配置未变化\n", javaPath)
+		return nil
+	}
+	cfg.Java = javaPath
+	if err := config.Save(dir, cfg); err != nil {
+		return err
+	}
+	fmt.Printf("[Config] 已设置实例 Java 路径: %s\n", javaPath)
 	return nil
 }
 

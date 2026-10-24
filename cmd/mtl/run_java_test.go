@@ -78,6 +78,18 @@ func TestResolveConfiguredJavaDeletedFileFallsBackToAuto(t *testing.T) {
 	}
 }
 
+func TestShouldPersistJava(t *testing.T) {
+	if shouldPersistJava(javaSourceCLI) {
+		t.Fatal("--java 为临时覆盖，不应回填配置")
+	}
+	if !shouldPersistJava(javaSourceConfig) {
+		t.Fatal("实例配置来源允许幂等回填")
+	}
+	if !shouldPersistJava(javaSourceRuntime) {
+		t.Fatal("全局缓存来源应回填配置")
+	}
+}
+
 func TestPersistInstanceJavaWritesOnceAndPreservesConfig(t *testing.T) {
 	dir := t.TempDir()
 	original := config.Default()
