@@ -55,6 +55,8 @@ func run(args []string) error {
 		return configCommand(args[1:])
 	case "mod":
 		return modCommand(args[1:])
+	case "java":
+		return javaCommand(args[1:])
 	case "version":
 		fmt.Println("mtl dev")
 		return nil
@@ -87,6 +89,9 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  mtl config set-mirror <mojang|assets|libraries|version-meta|mod|fabric|forge> <镜像地址>")
 	fmt.Fprintln(os.Stderr, "  mtl mod list --dir <实例目录> [--debug]")
 	fmt.Fprintln(os.Stderr, "  mtl mod enable|disable|rm <mod-id/文件名> --dir <实例目录>")
+	fmt.Fprintln(os.Stderr, "  mtl java list [--debug]")
+	fmt.Fprintln(os.Stderr, "  mtl java use <runtime-id>")
+	fmt.Fprintln(os.Stderr, "  mtl java prune")
 	fmt.Fprintln(os.Stderr, "  mtl version")
 }
 
@@ -555,12 +560,22 @@ func runInstance(args []string) error {
 		return err
 	}
 
-	// Java 优先级：命令行 --java > 实例配置 java（需仍真实存在）> 全局缓存自动匹配下载。
+	// Java 优先级：命令行 --java > 实例配置 java（需仍真实存在）
+	// > 全局默认（mtl java use）> 全局缓存自动匹配下载。
 	resolvedJava, javaSource := resolveConfiguredJava(*javaPath, instanceCfg)
+	if resolvedJava == "" && strings.TrimSpace(instanceCfg.Java) != "" {
+		fmt.Fprintf(os.Stdout, "[run] 实例配置中的 Java 路径已失效，重新选择 Java: %s\n", instanceCfg.Java)
+	}
 	if resolvedJava == "" {
-		if strings.TrimSpace(instanceCfg.Java) != "" {
-			fmt.Fprintf(os.Stdout, "[run] 实例配置中的 Java 路径已失效，重新自动匹配: %s\n", instanceCfg.Java)
+		if p, id, ok := resolveGlobalJava(); ok {
+			resolvedJava = p
+			javaSource = javaSourceGlobal
+			if *debug {
+				fmt.Fprintf(os.Stdout, "[Config] 全局默认 Java 运行时: %s（%s）\n", id, p)
+			}
 		}
+	}
+	if resolvedJava == "" {
 		spec := runtime.Spec{}
 		if inst.Vanilla != nil && inst.Vanilla.JavaVersion != nil {
 			spec.Component = inst.Vanilla.JavaVersion.Component

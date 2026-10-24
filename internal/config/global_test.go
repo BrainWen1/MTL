@@ -40,6 +40,7 @@ func TestSaveAndLoadGlobal(t *testing.T) {
 			Timeout:     "30s",
 			Concurrency: 8,
 		},
+		DefaultJava: "java-runtime-gamma",
 	}
 	if err := SaveGlobal(want); err != nil {
 		t.Fatalf("SaveGlobal: %v", err)
@@ -65,6 +66,38 @@ func TestSaveAndLoadGlobal(t *testing.T) {
 	}
 	if got.Download != want.Download {
 		t.Fatalf("下载配置 = %+v, want %+v", got.Download, want.Download)
+	}
+	if got.DefaultJava != "java-runtime-gamma" {
+		t.Fatalf("default_java = %q", got.DefaultJava)
+	}
+}
+
+func TestValidateDefaultJava(t *testing.T) {
+	for _, id := range []string{"", "java-runtime-gamma", "jre-legacy", "8"} {
+		if err := ValidateDefaultJava(id); err != nil {
+			t.Errorf("合法标识 %q 报错: %v", id, err)
+		}
+	}
+	for _, id := range []string{".", "..", "trailing.", "trailing ", "../etc", "a/b", `a\b`,
+		"a:b", "a*b", "a?b", "a\"b", "a<b", "a>b", "a|b", "a\x00b"} {
+		if err := ValidateDefaultJava(id); err == nil {
+			t.Errorf("非法标识 %q 应报错", id)
+		}
+	}
+
+	// 非法 default_java 应被清除，但其他合法字段保留。
+	cfg, err := NormalizeGlobal(Global{
+		Mirrors:     GlobalMirrors{Mojang: "https://mirror.example/mc"},
+		DefaultJava: "../escape",
+	})
+	if err == nil {
+		t.Fatal("非法 default_java 应返回错误")
+	}
+	if cfg.DefaultJava != "" {
+		t.Fatalf("非法 default_java 应被清空: %q", cfg.DefaultJava)
+	}
+	if cfg.Mirrors.Mojang != "https://mirror.example/mc" {
+		t.Fatalf("合法字段应保留: %q", cfg.Mirrors.Mojang)
 	}
 }
 

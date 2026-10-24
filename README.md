@@ -25,6 +25,7 @@ MTL 是自用项目，不是成熟的发行版启动器。功能按实际需要�
 - **整合包查看**：`mtl inspect` 可在安装前查看整合包信息，按需解压 overrides。
 - **实例列表与健康检查**：`mtl list` 只读扫描实例根目录，用表格展示加载器、默认账号和 Java 状态；`mtl info` 展示完整配置与健康检查报告。
 - **本地 Mod 管理**：`mtl mod list|enable|disable|rm` 离线读取 Fabric / Forge 元数据（含嵌套 jar 子模块），展示名称、版本、id、加载器与依赖；禁用只把 jar 移动到 `mods/disabled/`，不修改文件内容，可随时恢复。
+- **全局 Java 运行时管理**：`mtl java list|use|prune` 查看全实例共享的运行时缓存、设置全局默认 Java，并安全清理未被任何实例引用的版本。
 
 ## ⚠️ 当前已知限制
 
@@ -235,9 +236,9 @@ mtl run --dir <实例目录> [--account <账号>] [--username <名字>] [--memor
 - JVM 参数顺序为：版本固定参数 → `-Xms / -Xmx` → `--jvm-arg`，因此自定义参数可以覆盖内存配置。
 - `--game-arg` 只拼在主类之后，不会进入 JVM 参数区。
 - 实例配置中的参数在前，命令行追加的参数在后。
-- Java 优先级：`--java` > 实例配置 `java` > 全局缓存自动匹配下载。配置中的路径被手动删除时会自动重新匹配。
+- Java 优先级：`--java` > 实例配置 `java` > 全局默认（`mtl java use`）> 全局缓存自动匹配下载。配置中的路径被手动删除时会自动重新匹配。
 - 游戏成功运行结束后，本次自动匹配或实例配置选中的 Java 绝对路径会回填到实例配置（与已有值相同则跳过）；启动失败或中途崩溃不会修改配置。
-- `--java` 只对本次启动临时生效，不会写入实例配置。
+- `--java` 只对本次启动临时生效，不会写入实例配置；全局默认同样不回填，保证之后 `mtl java use` 切换仍对该实例生效。
 - `Ctrl+C` 会转发给游戏进程；10 秒内未退出则强制结束。
 
 ### mtl inspect
@@ -365,6 +366,44 @@ mtl mod rm <mod-id|文件名> --dir <实例目录>
 - 禁用通过文件移动实现，jar 内容保持不变；`mods/disabled/` 属于用户手动状态，mrpack 增量清理永远不会删除或移动其中的文件。
 - `enable` / `disable` 可安全重复执行；目标位置已存在同名文件时会报错，不会覆盖已有 mod。
 
+### mtl java
+
+管理全局共享的 Java 运行时缓存（`%APPDATA%/mtl/cache/runtime`、`~/.cache/mtl/runtime`）。运行时属于所有实例共享资源，不存放在单个实例目录内。
+
+```bash
+mtl java list [--debug]
+mtl java use <runtime-id>
+mtl java prune
+```
+
+| 子命令 | 说明 |
+| --- | --- |
+| `list` | 列出已缓存的全部运行时：标识、版本、操作系统、架构、状态、java 绝对路径、被哪些实例引用 |
+| `use` | 校验运行时与 `java -version` 后，写入全局配置 `default_java` |
+| `prune` | 只删除没有被任何实例或全局默认引用的运行时，并统计释放空间 |
+
+| 参数 | 说明 |
+| --- | --- |
+| `--debug` | 仅 `list` 可用；追加完整元信息与运行时目录结构（最多 2 层，条目过多时截断） |
+| `<runtime-id>` | 缓存目录名，例如 `java-runtime-gamma`；忽略大小写 |
+
+示例：
+
+```bash
+./mtl java list
+./mtl java list --debug
+./mtl java use java-runtime-gamma
+./mtl java prune
+```
+
+输出与安全说明：
+
+- `list` 会只读扫描 `./instances` 下的实例配置，统计每个运行时被哪些实例引用；缺少或损坏配置的实例会告警并跳过。
+- `use` 除了检查文件存在与执行权限，还会实际执行一次带 15 秒超时的 `java -version`；校验失败拒绝设置，不会写入无效配置。
+- `prune` 跳过被实例配置 `java` 或全局 `default_java` 引用的运行时，并打印跳过原因；只删除运行时缓存目录内的普通目录，不跟随符号链接，`manifests/` 与隐藏暂存目录不在清理范围内。
+- 引用检测按路径归属判断：实例配置的 Java 路径位于某个运行时目录内即视为引用，不受运行时是否校验通过影响。
+- 写入全局 `default_java` 前会重新读取全局配置，保留镜像源等其他字段；重复执行 `use`、`prune` 均幂等。
+
 ### mtl account
 
 管理全局离线账号。
@@ -428,7 +467,7 @@ mtl config set-mirror <类型> <镜像地址>（传空字符串恢复官方源�
 | `add-game-arg <参数>` | 添加一条游戏参数 |
 | `remove-game-arg <参数>` | 删除第一条匹配的游戏参数 |
 | `reset` | 将实例配置重置为默认值（包括解绑默认账号） |
-| `global` | 显示全局配置路径与内容（镜像源、下载日志模式等） |
+| `global` | 显示全局配置路径与内容（镜像源、下载日志模式、默认 Java 等） |
 | `set-mirror <类型> <地址>` | 修改全局镜像；类型：`mojang`、`assets`、`libraries`、`version-meta`、`mod`、`fabric`、`forge` |
 
 示例：
@@ -474,9 +513,12 @@ mtl config set-mirror <类型> <镜像地址>（传空字符串恢复官方源�
     "retries": 0,
     "timeout": "30s",
     "concurrency": 4
-  }
+  },
+  "default_java": "java-runtime-gamma"
 }
 ```
+
+`default_java` 是 `mtl java use` 写入的全局默认运行时标识（缓存目录名），省略或为空表示未设置；只保存标识而不保存绝对路径，便于跨平台迁移缓存目录。
 
 优先级：**命令行参数 > 环境变量 > 全局配置文件 > 默认官方源**。镜像只替换域名（以及镜像自带的前缀路径），资源路径保持不变；镜像请求失败后自动回退原始官方地址。
 
@@ -691,9 +733,9 @@ go test ./...
    - `mtl mod list|enable|disable|rm`：离线读取 `fabric.mod.json` / `META-INF/mods.toml`（含 `META-INF/jars/` 嵌套模块），展示名称、版本、id、加载器与依赖。
    - 离线检测重复 Mod、加载器不匹配、缺失前置；禁用通过移动到 `mods/disabled/` 实现，不修改 jar，可随时恢复。
    - mrpack 增量清理会跳过 `mods/disabled/`，不会删除用户手动禁用的 mod。
-5. **Java 运行时管理**
-   - `mtl java list|use|prune`：查看缓存运行时、手动登记本机 Java、清理未使用版本。
-   - 与现有实例 `java` 字段、`--java` 优先级保持一致。
+5. ✅ **全局 Java 运行时管理（已实现）**
+   - `mtl java list|use|prune`：查看缓存运行时、设置全局默认 Java、清理未被任何实例引用的版本。
+   - 优先级与现有实例 `java` 字段、`--java` 保持一致；`prune` 保护被实例或全局默认引用的运行时。
 6. **崩溃诊断与启动日志增强**
    - 每次启动落盘独立日志，保留最近 N 次；崩溃摘要附带 Mod 列表快照。
    - 补充 Java 版本不匹配、内存不足（OOM）、显卡驱动等离线规则。

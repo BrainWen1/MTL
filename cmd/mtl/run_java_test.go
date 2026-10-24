@@ -78,6 +78,38 @@ func TestResolveConfiguredJavaDeletedFileFallsBackToAuto(t *testing.T) {
 	}
 }
 
+func TestResolveGlobalJava(t *testing.T) {
+	runtimeRoot, _ := isolateJavaEnv(t)
+	goodJava, _ := writeTestRuntime(t, runtimeRoot, "java-runtime-gamma", true)
+	_, _ = writeTestRuntime(t, runtimeRoot, "java-runtime-bad", false)
+
+	if _, _, ok := resolveGlobalJava(); ok {
+		t.Fatal("未设置 default_java 时应返回 false")
+	}
+
+	if err := config.SaveGlobal(config.Global{DefaultJava: "java-runtime-gamma"}); err != nil {
+		t.Fatal(err)
+	}
+	path, id, ok := resolveGlobalJava()
+	if !ok || path != goodJava || id != "java-runtime-gamma" {
+		t.Fatalf("全局默认解析 = %q, %q, %v", path, id, ok)
+	}
+
+	// 校验失败或运行时被删除时回退自动匹配，不阻断启动。
+	if err := config.SaveGlobal(config.Global{DefaultJava: "java-runtime-bad"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := resolveGlobalJava(); ok {
+		t.Fatal("校验失败时应返回 false")
+	}
+	if err := config.SaveGlobal(config.Global{DefaultJava: "missing-runtime"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := resolveGlobalJava(); ok {
+		t.Fatal("运行时缺失时应返回 false")
+	}
+}
+
 func TestShouldPersistJava(t *testing.T) {
 	if shouldPersistJava(javaSourceCLI) {
 		t.Fatal("--java 为临时覆盖，不应回填配置")
@@ -87,6 +119,9 @@ func TestShouldPersistJava(t *testing.T) {
 	}
 	if !shouldPersistJava(javaSourceRuntime) {
 		t.Fatal("全局缓存来源应回填配置")
+	}
+	if shouldPersistJava(javaSourceGlobal) {
+		t.Fatal("全局默认不应回填配置，否则 mtl java use 切换后无法生效")
 	}
 }
 

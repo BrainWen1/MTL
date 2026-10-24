@@ -30,6 +30,9 @@ const (
 type Global struct {
 	Mirrors  GlobalMirrors  `json:"mirrors"`
 	Download GlobalDownload `json:"download"`
+	// DefaultJava 是 mtl java use 设置的全局默认 Java 运行时标识（runtime 缓存目录名）。
+	// 仅在命令行未传 --java 且实例配置未指定 java 时生效；不保存可执行文件绝对路径。
+	DefaultJava string `json:"default_java,omitempty"`
 }
 
 // GlobalMirrors 是各类下载源的镜像配置；空字符串表示使用官方源。
@@ -202,10 +205,38 @@ func NormalizeGlobal(cfg Global) (Global, error) {
 			cfg.Download.Timeout = ""
 		}
 	}
+	cfg.DefaultJava = strings.TrimSpace(cfg.DefaultJava)
+	if err := ValidateDefaultJava(cfg.DefaultJava); err != nil {
+		problems = append(problems, err.Error())
+		cfg.DefaultJava = ""
+	}
 	if len(problems) > 0 {
 		return cfg, errors.New(strings.Join(problems, "；"))
 	}
 	return cfg, nil
+}
+
+// ValidateDefaultJava 校验全局默认 Java 运行时标识：空字符串表示未设置；
+// 非空时只允许单层目录名，避免被误用为路径或包含跨平台非法字符。
+func ValidateDefaultJava(id string) error {
+	if id == "" {
+		return nil
+	}
+	if id == "." || id == ".." {
+		return fmt.Errorf("default_java %q 非法", id)
+	}
+	if strings.HasSuffix(id, ".") || strings.HasSuffix(id, " ") {
+		return fmt.Errorf("default_java %q 非法：不能以点或空格结尾", id)
+	}
+	for _, r := range id {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("default_java %q 非法：包含控制字符", id)
+		}
+		if strings.ContainsRune(`/\:*?"<>|`, r) {
+			return fmt.Errorf("default_java %q 非法：包含路径保留字符 %q", id, r)
+		}
+	}
+	return nil
 }
 
 // NormalizeMirror 校验并规范化镜像地址；空字符串表示不启用镜像。
