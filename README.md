@@ -27,6 +27,7 @@ MTL 是自用项目，不是成熟的发行版启动器。功能按实际需要�
 - **实例列表与健康检查**：`mtl list` 只读扫描实例根目录，用表格展示加载器、默认账号和 Java 状态；`mtl info` 展示完整配置与健康检查报告。
 - **本地 Mod 管理**：`mtl mod list|enable|disable|rm` 离线读取 Fabric / Forge 元数据（含嵌套 jar 子模块），展示名称、版本、id、加载器与依赖；禁用只把 jar 移动到 `mods/disabled/`，不修改文件内容，可随时恢复。
 - **全局 Java 运行时管理**：`mtl java list|use|prune` 查看全实例共享的运行时缓存、设置全局默认 Java，并安全清理未被任何实例引用的版本。
+- **实例备份与还原**：`mtl backup` / `mtl restore` 使用标准库 `archive/zip` 流式打包实例本地数据（存档、mod、配置、日志、资源包、截图等），默认写入全局备份目录；还原时校验路径穿越与软链接，目标已存在需显式 `--force`，并自动把被覆盖的旧目录/文件改名为 `.old-时间戳` 保留。
 
 ## ⚠️ 当前已知限制
 
@@ -38,6 +39,8 @@ MTL 是自用项目，不是成熟的发行版启动器。功能按实际需要�
 - 增量清理只识别 mrpack 安装写入 `.mtl/pack-lock.json` 的托管文件；旧实例首次重新安装不会清理历史文件，只会从本次安装开始建立锁定清单。
 - 纯净模板实例不生成 pack-lock，也不参与整合包清理；其中的 mod、配置与存档完全由用户手动管理。
 - 清理前会校验文件哈希，用户修改过的旧托管文件会保留；`saves/` 与 `.mtl/` 永远不参与清理。
+- 实例备份不包含 `libraries/`、`assets/`、`versions/` 等可重新获取的托管内容；还原到新目录后仍需通过 `mtl install` / `mtl run` 准备游戏本体与加载器文件。
+- `mtl restore --force` 生成的 `.old-时间戳` 安全副本不会自动清理，确认还原无误后需手动删除。
 - 没有图形界面、皮肤/披风、在线 Mod 市场、自动更新等启动器周边功能。
 - Linux arm64 没有 Mojang 官方 Java 运行时，需要 `--java` 指定本机 Java。
 
@@ -295,6 +298,90 @@ mtl diagnose --last
 - 若最近的崩溃报告明显早于本次运行日志，则只展示路径、不参与关键词匹配，避免历史崩溃把正常退出误判为崩溃。
 - 没有日志或崩溃报告时只输出友好提示，不会报错或 panic；诊断失败不会影响正常启动。
 - 关键词匹配存在误报/漏报，复杂崩溃仍需查看完整日志。
+
+### mtl backup
+
+把单个实例的本地数据打包为可还原的 zip。备份过程只读扫描实例，不修改原文件。
+
+```bash
+mtl backup <实例名> [--dir <实例根目录>] [--out <zip路径>] [--name <备注>] [--dry-run] [--debug]
+```
+
+| 参数 | 说明 |
+| --- | --- |
+| `<实例名>` | 必填，实例根目录下的单层目录名 |
+| `--dir <实例根目录>` | 实例根目录，默认 `./instances` |
+| `--out <zip路径>` | 自定义输出文件；省略时写入默认备份目录，且不会覆盖已有文件 |
+| `--name <备注>` | 写入 `backup.json` 的备注，并附加到默认文件名；非法文件名字符会替换为 `-` |
+| `--dry-run` | 只扫描并打印将要打包的文件列表，不生成 zip |
+| `--debug` | 输出完整目录/文件清单与大小 |
+
+默认备份目录：
+
+- Windows：`%APPDATA%\mtl\backups`
+- Linux / macOS：`~/.cache/mtl/backups`
+- 可用环境变量 `MTL_BACKUPS_DIR` 覆盖
+
+默认文件名格式：`{实例名}-{YYYYMMDD-HHMMSS}-{备注}.zip`；没有 `--name` 时为 `{实例名}-{YYYYMMDD-HHMMSS}.zip`。同一秒重名会自动追加 `-2`、`-3`。
+
+打包范围：
+
+- 包含：`saves/`、`mods/`、`config/`、`logs/`、`crash-reports/`、`resourcepacks/`、`screenshots/`、`.mtl/`，以及实例根目录下的普通配置文件（如 `options.txt`、`launcher_profiles.json`）。
+- 排除：`libraries/`、`assets/`、`versions/`、其他非白名单一级目录，以及任何软链接、目录联接或解析后位于实例目录之外的文件。Java runtime 与 assets 属于全局缓存，不在实例目录内，也不会进入备份。
+- 每个 zip 根目录都包含 `backup.json`：
+
+```json
+{
+  "instance": "demo",
+  "created_at": "2026-10-24T15:30:00+08:00",
+  "name": "v1.20.1 测试存档",
+  "include": [".mtl", "config", "mods", "options.txt", "saves"]
+}
+```
+
+示例：
+
+```bash
+./mtl backup demo
+./mtl backup demo --name "v1.20.1测试存档"
+./mtl backup demo --out ./mybackup.zip
+./mtl backup demo --dry-run --debug
+```
+
+### mtl restore
+
+从备份包还原实例，或列出本地备份。
+
+```bash
+mtl restore <备份zip路径> --target <实例名> [--dir <实例根目录>] [--force] [--debug]
+mtl restore --list
+```
+
+| 参数 | 说明 |
+| --- | --- |
+| `<备份zip路径>` | `mtl backup` 生成的 zip |
+| `--target <实例名>` | 目标实例名；不存在时自动新建 |
+| `--dir <实例根目录>` | 目标实例根目录，默认 `./instances` |
+| `--force` | 目标实例已存在时允许覆盖；旧内容保留为 `.old-时间戳` |
+| `--debug` | 输出逐文件还原详情 |
+| `--list` | 列出默认备份目录中的全部 zip，展示备份时间、来源实例、备注与大小 |
+
+示例：
+
+```bash
+./mtl restore --list
+./mtl restore ./mybackup.zip --target demo
+./mtl restore ./mybackup.zip --target demo --force
+```
+
+还原规则：
+
+- 还原前读取并展示 `backup.json` 摘要（来源实例、备份时间、备注、包含范围）。
+- 目标实例已存在且未加 `--force` 时直接拒绝，不修改任何文件。
+- `--force` 只处理备份包实际会覆盖的一级目录/文件：先把目标中的 `saves`、`mods`、`config`、`options.txt` 等改名为 `saves.old-YYYYMMDD-HHMMSS` 等安全副本，再解压新内容。目标实例中备份未覆盖的其他文件保持不变。
+- 还原只处理 `backup.json` 以外的数据条目；备份包中不存在的目录不会删除目标实例中的对应内容。
+- zip 内所有路径都会经过 `SafeJoin` 同等级别的校验；拒绝绝对路径、`..`、反斜杠、盘符、Windows 保留名、软链接/特殊文件、重复条目以及文件/目录前缀冲突。
+- 解压采用流式复制，不会把大文件整体读入内存。
 
 ### mtl inspect
 
@@ -583,7 +670,7 @@ mtl config set-log-level <debug|info|warn|error>
 
 优先级：**命令行参数 > 环境变量 > 全局配置文件 > 默认官方源**。镜像只替换域名（以及镜像自带的前缀路径），资源路径保持不变；镜像请求失败后自动回退原始官方地址。
 
-环境变量：`MTL_MOJANG_MIRROR`、`MTL_ASSETS_MIRROR`、`MTL_LIBRARIES_MIRROR`、`MTL_VERSION_META_MIRROR`、`MTL_MOD_MIRROR`、`MTL_FABRIC_MIRROR`、`MTL_FORGE_MIRROR`、`MTL_DOWNLOAD_LOG`、`MTL_DOWNLOAD_RETRIES`、`MTL_DOWNLOAD_TIMEOUT`、`MTL_DOWNLOAD_CONCURRENCY`、`MTL_LOG_LEVEL`。
+环境变量：`MTL_MOJANG_MIRROR`、`MTL_ASSETS_MIRROR`、`MTL_LIBRARIES_MIRROR`、`MTL_VERSION_META_MIRROR`、`MTL_MOD_MIRROR`、`MTL_FABRIC_MIRROR`、`MTL_FORGE_MIRROR`、`MTL_DOWNLOAD_LOG`、`MTL_DOWNLOAD_RETRIES`、`MTL_DOWNLOAD_TIMEOUT`、`MTL_DOWNLOAD_CONCURRENCY`、`MTL_LOG_LEVEL`、`MTL_BACKUPS_DIR`。
 
 下载失败会继续处理其他文件，最后按「网络失败 / 哈希校验失败 / 不支持断点续传 / 本地文件错误」汇总；中断后重新执行同一命令会从 `*.tmp` 继续下载。
 
@@ -650,6 +737,7 @@ Linux / macOS：`~/.cache/mtl/` 下为相同结构。
 - `runtime/` 与 `assets/` 由所有实例共享，可安全复用。
 - 账号数据单独放在 `accounts/`，与实例、runtime、assets 隔离。
 - 删除 `runtime/` 或 `assets/` 只会导致下次重新下载，不会损坏已有实例。
+- 实例备份默认放在 `%APPDATA%\mtl\backups`（Linux/macOS 为 `~/.cache/mtl/backups`），与实例目录、runtime、assets 隔离；可用 `MTL_BACKUPS_DIR` 覆盖。
 
 全局配置目录（`%APPDATA%/mtl/` 或 `~/.config/mtl/`）中另有：
 
@@ -759,6 +847,7 @@ MTL 的崩溃诊断分为两部分：`mtl run` 结束后的**自动归档 + 快�
 - `internal/logging`：分级日志、终端/文件双阈值、实例独立运行日志创建
 - `internal/lastrun`：最近一次运行状态（实例、日志、PID、退出码）持久化，供 `diagnose --last`
 - `internal/diagnose`：日志/崩溃报告发现、退出码分类、关键词规则与诊断报告
+- `internal/backup`：实例只读扫描、流式 zip 打包、元信息读取、安全还原与 `--list`
 
 开发约定：
 
@@ -813,9 +902,10 @@ go test ./...
    - 每次启动落盘独立日志 `logs/run-YYYYMMDD-HHMM.log`，终端与文件分级过滤，记录账号、版本、Java、内存、参数、PID 与退出码。
    - 新增 `mtl diagnose <实例名>` / `--last`：汇总最近日志与崩溃报告，覆盖 OOM、Mod 解析/重复/依赖/版本冲突、Mixin、Java 版本与路径、assets/本地库缺失等离线规则。
    - 后续可补充 Mod 列表快照与显卡驱动规则。
-7. **实例备份与恢复**
-   - `mtl backup --dir <目录> [--include mods|config|saves|all]`，输出可恢复的压缩包。
-   - 支持启动前自动备份存档，避免整合包更新或崩溃损坏世界。
+7. ✅ **实例备份与恢复（已实现）**
+   - `mtl backup <实例名>`：只读扫描实例本地数据，流式生成 zip，支持 `--out`、`--name`、`--dry-run` 与 `--debug`。
+   - `mtl restore <zip> --target <实例名>`：目标不存在时新建；已存在默认拒绝，`--force` 会先把被覆盖的旧目录/文件保留为 `.old-时间戳`；`mtl restore --list` 查看本地备份。
+   - 备份与还原均排除 `libraries` / `assets` / `versions` 等可重新获取的托管内容，并对 zip 路径穿越、软链接与特殊文件做严格校验。
 
 ### P2 — 体验对齐（按需）
 

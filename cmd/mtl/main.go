@@ -54,6 +54,10 @@ func run(args []string) error {
 		return infoCommand(args[1:])
 	case "diagnose":
 		return diagnoseCommand(args[1:])
+	case "backup":
+		return backupCommand(args[1:])
+	case "restore":
+		return restoreCommand(args[1:])
 	case "account":
 		return accountCommand(args[1:])
 	case "config":
@@ -81,6 +85,9 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  mtl info [--dir <实例根目录>] <实例名>")
 	fmt.Fprintln(os.Stderr, "  mtl diagnose [--dir <实例根目录>] <实例名>（诊断最近日志与崩溃报告）")
 	fmt.Fprintln(os.Stderr, "  mtl diagnose --last（诊断上一次运行的实例）")
+	fmt.Fprintln(os.Stderr, "  mtl backup <实例名> [--dir <实例根目录>] [--out <zip路径>] [--name <备注>] [--dry-run] [--debug]")
+	fmt.Fprintln(os.Stderr, "  mtl restore <备份zip路径> --target <实例名> [--dir <实例根目录>] [--force] [--debug]")
+	fmt.Fprintln(os.Stderr, "  mtl restore --list")
 	fmt.Fprintln(os.Stderr, "  mtl account list")
 	fmt.Fprintln(os.Stderr, "  mtl account add <name>")
 	fmt.Fprintln(os.Stderr, "  mtl account rm <name>")
