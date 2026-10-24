@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"mtl/internal/config"
 	"mtl/internal/fabric"
 	"mtl/internal/mrpack"
 )
@@ -279,10 +280,19 @@ func TestInstallFabricLoader(t *testing.T) {
 		"[Fabric] 拉取loader元信息",
 		"[Fabric] 下载library test.group:fabric-lib:1.0",
 		"[Fabric] 安装完成",
+		"[Loader] 已记录加载器: fabric 0.15.0",
 	} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("输出缺少 %q:\n%s", want, out.String())
 		}
+	}
+
+	cfg, err := config.Load(instance)
+	if err != nil {
+		t.Fatalf("Load 实例配置: %v", err)
+	}
+	if cfg.LoaderType != "fabric" || cfg.LoaderVersion != "0.15.0" {
+		t.Fatalf("加载器信息未写入配置: %+v", cfg)
 	}
 }
 
@@ -298,8 +308,27 @@ func TestInstallSkipLoader(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(instance, "versions")); !os.IsNotExist(err) {
 		t.Fatal("--skip-loader 不应写入 versions 目录")
 	}
-	if !strings.Contains(out.String(), "已跳过 Fabric loader 安装") {
+	if !strings.Contains(out.String(), "已跳过加载器安装") {
 		t.Fatalf("输出缺少跳过提示:\n%s", out.String())
+	}
+}
+
+func TestInstallRejectsOldForge(t *testing.T) {
+	idx := &mrpack.Index{
+		FormatVersion: 1,
+		Game:          "minecraft",
+		VersionID:     "1.0.0",
+		Name:          "Old Forge Test",
+		Files:         []mrpack.File{},
+		Dependencies: map[string]string{
+			mrpack.DepMinecraft: "1.19.2",
+			mrpack.DepForge:     "1.19.2-43.2.0",
+		},
+	}
+	pack := buildPack(t, idx, nil)
+	err := installPack(pack, filepath.Join(t.TempDir(), "inst"), installOptions{}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "暂不支持") {
+		t.Fatalf("低版本 Forge 应直接拒绝: %v", err)
 	}
 }
 

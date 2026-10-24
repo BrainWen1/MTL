@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"mtl/internal/assets"
+	"mtl/internal/config"
+	"mtl/internal/loader"
 )
 
 const shutdownGrace = 10 * time.Second
@@ -125,6 +127,30 @@ func Run(ctx context.Context, opts Options) error {
 	logf("实例: %s", l.Dir)
 	logf("版本: %s（Minecraft %s）", l.ProfileID, l.GameVersion)
 
+	// 加载器类型优先取实例配置；旧实例没有该字段时按 profile id 推断（默认 Fabric）。
+	instCfg, _ := config.Load(l.Dir)
+	loaderType := instCfg.LoaderType
+	if loaderType == "" {
+		loaderType = loader.Detect(l.ProfileID)
+	}
+	instance := &config.Instance{
+		Dir:              l.Dir,
+		MinecraftVersion: l.GameVersion,
+		LoaderType:       loaderType,
+		LoaderVersion:    instCfg.LoaderVersion,
+	}
+	ld, err := loader.NewLoader(loaderType, l.GameVersion)
+	if err != nil {
+		return err
+	}
+	loaderArgs, err := ld.GetLaunchArgs(ctx, instance)
+	if err != nil {
+		return err
+	}
+	if opts.Debug {
+		fmt.Fprintf(out, "[Loader] 加载器: %s（Minecraft %s）\n", ld.Name(), l.GameVersion)
+	}
+
 	javaPath, javaMajor, err := findJava(ctx, l.JavaMajor, opts.JavaPath)
 	if err != nil {
 		return err
@@ -184,6 +210,8 @@ func Run(ctx context.Context, opts Options) error {
 	if err != nil {
 		return err
 	}
+	// 加载器额外参数位于固定 JVM 参数之后、内存与用户自定义参数之前。
+	jvm = append(jvm, loaderArgs...)
 	jvm, memArgs := composeJVM(jvm, opts.Memory, opts.ExtraJVMArgs)
 	jvm, d3dAdded := ensureD3DArg(jvm, opts.PreferHighPerfGPU)
 	if len(memArgs) > 0 {

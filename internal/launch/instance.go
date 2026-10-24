@@ -31,7 +31,7 @@ type Launch struct {
 	JavaMajor   int
 }
 
-// Load 读取 instances/versions 下的 Fabric profile 与 vanilla 版本 json。
+// Load 读取 instances/versions 下的加载器 profile 与 vanilla 版本 json。
 func Load(instanceDir string) (*Launch, error) {
 	return load(instanceDir, runtime.GOOS, runtime.GOARCH)
 }
@@ -50,7 +50,7 @@ func load(instanceDir, goos, goarch string) (*Launch, error) {
 	}
 	gameVersion := profile.InheritsFrom
 	if err := mrpack.ValidateRelPath(gameVersion); err != nil {
-		return nil, fmt.Errorf("Fabric profile 的 inheritsFrom %q 非法: %w", gameVersion, err)
+		return nil, fmt.Errorf("加载器 profile 的 inheritsFrom %q 非法: %w", gameVersion, err)
 	}
 
 	vanillaPath, err := mrpack.SafeJoin(abs, "versions/"+gameVersion+"/"+gameVersion+".json")
@@ -142,7 +142,7 @@ func findProfile(instanceDir string) (*Version, error) {
 
 	switch len(candidates) {
 	case 0:
-		return nil, errors.New("未找到可用的 Fabric 版本 json（需要 versions/<id>/<id>.json 含 inheritsFrom，且父版本文件存在）")
+		return nil, errors.New("未找到可用的加载器版本 json（需要 versions/<id>/<id>.json 含 inheritsFrom，且父版本文件存在）")
 	case 1:
 		return candidates[0], nil
 	default:

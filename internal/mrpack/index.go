@@ -146,6 +146,14 @@ func (idx *Index) validate() error {
 	if _, ok := idx.Dependencies[depNeoForge]; ok {
 		return fmt.Errorf("暂不支持 NeoForge")
 	}
+	// dependencies 除 minecraft 外只允许已知加载器键，避免未知加载器被静默忽略。
+	for key := range idx.Dependencies {
+		switch key {
+		case DepMinecraft, DepFabricLoader, DepQuiltLoader, DepForge, depNeoForge:
+		default:
+			return fmt.Errorf("不支持该加载器 %q", key)
+		}
+	}
 
 	var loader *loaderDep
 	for i := range loaderDeps {

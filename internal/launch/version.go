@@ -1,5 +1,5 @@
-// Package launch 负责启动已安装的 Fabric 实例：解析版本 json、组装 classpath、
-// 解压 native、拼接启动参数并管理 Java 子进程。
+// Package launch 负责启动已安装的实例（Fabric / Forge）：解析版本 json、组装
+// classpath、解压 native、拼接启动参数并管理 Java 子进程。
 package launch
 
 import (

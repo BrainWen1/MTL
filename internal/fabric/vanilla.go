@@ -24,7 +24,13 @@ type mojangVersion struct {
 	Downloads struct {
 		Client mojangArtifact `json:"client"`
 	} `json:"downloads"`
-	Libraries []mojangLibrary `json:"libraries"`
+	Libraries   []mojangLibrary    `json:"libraries"`
+	JavaVersion *mojangJavaVersion `json:"javaVersion"`
+}
+
+type mojangJavaVersion struct {
+	Component    string `json:"component"`
+	MajorVersion int    `json:"majorVersion"`
 }
 
 type mojangLibrary struct {

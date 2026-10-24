@@ -40,6 +40,10 @@ type Config struct {
 	// DefaultAccount 是实例绑定的默认离线账号名，空字符串表示未绑定。
 	// 只保存账号名称，不存储密码或令牌。
 	DefaultAccount string `json:"default_account"`
+	// LoaderType / LoaderVersion 记录安装时使用的加载器，供 run 阶段选择实现。
+	// 旧版本实例没有这两个字段，读取后为空，由 launch 按 profile id 兼容推断。
+	LoaderType    string `json:"loader_type"`
+	LoaderVersion string `json:"loader_version"`
 }
 
 // Default 返回配置文件缺失或损坏时使用的默认配置：自动内存、无自定义参数、
@@ -178,6 +182,8 @@ func normalize(cfg Config) (Config, error) {
 	}
 	cfg.ManualMemory = strings.TrimSpace(cfg.ManualMemory)
 	cfg.DefaultAccount = strings.TrimSpace(cfg.DefaultAccount)
+	cfg.LoaderType = strings.ToLower(strings.TrimSpace(cfg.LoaderType))
+	cfg.LoaderVersion = strings.TrimSpace(cfg.LoaderVersion)
 	if err := ValidateDefaultAccount(cfg.DefaultAccount); err != nil {
 		return Default(), err
 	}

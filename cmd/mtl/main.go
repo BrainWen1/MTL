@@ -16,7 +16,9 @@ import (
 	"mtl/internal/crash"
 	"mtl/internal/downloader"
 	"mtl/internal/fabric"
+	"mtl/internal/forge"
 	"mtl/internal/launch"
+	"mtl/internal/loader"
 	"mtl/internal/memory"
 	"mtl/internal/mrpack"
 	"mtl/internal/runtime"
@@ -56,7 +58,7 @@ func run(args []string) error {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "用法:")
-	fmt.Fprintln(os.Stderr, "  mtl install --dir <实例目录> [--concurrency N] [--skip-loader] <pack.mrpack>")
+	fmt.Fprintln(os.Stderr, "  mtl install --dir <实例目录> [--concurrency N] [--skip-loader] <pack.mrpack>（支持 Fabric / Forge 1.20.1+）")
 	fmt.Fprintln(os.Stderr, "  mtl run --dir <实例目录> [--account <账号>] [--username <名字>] [--memory <内存>] [--memory-auto] [--highperf-gpu|--no-highperf-gpu] [--java <java路径>] [--jvm-arg <参数>]... [--game-arg <参数>]... [--debug]")
 	fmt.Fprintln(os.Stderr, "  mtl inspect [--extract <dir>] <pack.mrpack>")
 	fmt.Fprintln(os.Stderr, "  mtl account list")
@@ -76,7 +78,7 @@ func install(args []string) error {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	dir := fs.String("dir", "", "实例目录（必填）")
 	concurrency := fs.Int("concurrency", 0, "并发下载数，0 表示使用默认值")
-	skipLoader := fs.Bool("skip-loader", false, "跳过 Fabric loader 安装")
+	skipLoader := fs.Bool("skip-loader", false, "跳过加载器（Fabric/Forge）安装")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -92,8 +94,9 @@ func install(args []string) error {
 type installOptions struct {
 	concurrency int
 	skipLoader  bool
-	// fabric 仅用于测试注入 mock 服务地址；零值使用官方端点。
+	// fabric / forge 仅用于测试注入 mock 服务地址；零值使用官方端点。
 	fabric fabric.Options
+	forge  forge.Options
 }
 
 // installPack 初始化实例目录、下载客户端文件、解压 overrides，最后安装 Fabric loader。
@@ -148,25 +151,56 @@ func installPack(packPath, dir string, opts installOptions, out io.Writer) error
 	fmt.Fprintln(out, "overrides 已解压")
 
 	if opts.skipLoader {
-		fmt.Fprintln(out, "已跳过 Fabric loader 安装")
+		fmt.Fprintln(out, "已跳过加载器安装")
 		fmt.Fprintf(out, "实例安装完成: %s\n", dir)
 		return nil
 	}
-	if loaderType != mrpack.LoaderFabric {
-		return fmt.Errorf("暂不支持 %s loader 的自动安装", loaderType)
-	}
 
-	fabOpts := opts.fabric
-	fabOpts.Concurrency = opts.concurrency
-	fabOpts.Progress = func(msg string) {
+	mcVersion := idx.Dependencies[mrpack.DepMinecraft]
+	loaderOpts := loader.Options{
+		Fabric: opts.fabric,
+		Forge:  opts.forge,
+	}
+	loaderOpts.Fabric.Concurrency = opts.concurrency
+	loaderOpts.Fabric.Progress = func(msg string) {
 		fmt.Fprintf(out, "[Fabric] %s\n", msg)
 	}
-	res, err := fabric.Install(ctx, dir, idx.Dependencies[mrpack.DepMinecraft], loaderVersion, fabOpts)
-	if err != nil {
-		return fmt.Errorf("Fabric loader 安装失败: %w", err)
+	loaderOpts.Forge.Concurrency = opts.concurrency
+	loaderOpts.Forge.Progress = func(msg string) {
+		fmt.Fprintf(out, "[Forge] %s\n", msg)
 	}
-	fmt.Fprintf(out, "[Fabric] 安装完成: %s（下载 %d，跳过 %d）\n", res.ProfileID, res.Downloaded, res.Skipped)
+	ld, err := loader.NewLoaderWithOptions(string(loaderType), mcVersion, loaderOpts)
+	if err != nil {
+		return err
+	}
+	if err := ld.Install(ctx, &config.Instance{
+		Dir:              dir,
+		MinecraftVersion: mcVersion,
+		LoaderType:       string(loaderType),
+		LoaderVersion:    loaderVersion,
+	}); err != nil {
+		return fmt.Errorf("%s loader 安装失败: %w", loaderType, err)
+	}
+	if err := recordLoaderInfo(dir, string(loaderType), loaderVersion, out); err != nil {
+		return err
+	}
 	fmt.Fprintf(out, "实例安装完成: %s\n", dir)
+	return nil
+}
+
+// recordLoaderInfo 把加载器信息写入实例配置，保留原有配置字段。
+func recordLoaderInfo(dir, loaderType, loaderVersion string, out io.Writer) error {
+	cfg, err := config.Load(dir)
+	if err != nil {
+		fmt.Fprintf(out, "[Loader] 警告: 读取实例配置失败，将重建加载器信息: %v\n", err)
+		cfg = config.Default()
+	}
+	cfg.LoaderType = loaderType
+	cfg.LoaderVersion = loaderVersion
+	if err := config.Save(dir, cfg); err != nil {
+		return fmt.Errorf("保存实例加载器信息失败: %w", err)
+	}
+	fmt.Fprintf(out, "[Loader] 已记录加载器: %s %s\n", loaderType, loaderVersion)
 	return nil
 }
 

@@ -249,6 +249,113 @@ func Install(ctx context.Context, instanceDir, gameVersion, loaderVersion string
 	}, nil
 }
 
+// VanillaResult 描述一次原版文件准备的结果。
+type VanillaResult struct {
+	VersionID     string
+	Files         int
+	Downloaded    int
+	Skipped       int
+	JavaComponent string
+	JavaMajor     int
+}
+
+// EnsureVanilla 只准备原版文件：versions/<mc>/<mc>.json、client jar 和 vanilla libraries。
+// 它复用与 Install 相同的下载、校验逻辑，供 Forge 等需要继承原版版本的加载器使用；
+// 已存在且哈希正确的文件会被跳过，可安全重复执行。
+func EnsureVanilla(ctx context.Context, instanceDir, gameVersion string, opts Options) (VanillaResult, error) {
+	if instanceDir == "" {
+		return VanillaResult{}, errors.New("实例目录为空")
+	}
+	if err := validateVersionSegment("Minecraft 版本", gameVersion); err != nil {
+		return VanillaResult{}, err
+	}
+	o := opts.normalize()
+	if err := validateTargetPlatform(o.targetOS, o.targetArch); err != nil {
+		return VanillaResult{}, err
+	}
+
+	o.progress.report("拉取 vanilla 版本元信息")
+	vanillaRaw, err := fetchVanillaVersion(ctx, gameVersion, o)
+	if err != nil {
+		return VanillaResult{}, err
+	}
+	var vanilla mojangVersion
+	if err := json.Unmarshal(vanillaRaw, &vanilla); err != nil {
+		return VanillaResult{}, fmt.Errorf("解析 Minecraft %s 版本 json 失败: %w", gameVersion, err)
+	}
+	if vanilla.ID != "" && vanilla.ID != gameVersion {
+		return VanillaResult{}, fmt.Errorf("Minecraft 版本 json id 异常: %q，期望 %q", vanilla.ID, gameVersion)
+	}
+
+	vanillaArts, err := vanillaArtifacts(vanilla, o.targetOS, o.targetArch, o.progress)
+	if err != nil {
+		return VanillaResult{}, err
+	}
+
+	seen := make(map[string]artifact)
+	var arts []artifact
+	add := func(a artifact) error {
+		if prev, ok := seen[a.relPath]; ok {
+			if prev.kind != a.kind || !strings.EqualFold(prev.sum, a.sum) {
+				return fmt.Errorf("文件路径冲突: %s", a.relPath)
+			}
+			return nil
+		}
+		seen[a.relPath] = a
+		arts = append(arts, a)
+		return nil
+	}
+	for _, a := range vanillaArts {
+		if err := add(a); err != nil {
+			return VanillaResult{}, err
+		}
+	}
+
+	client := vanilla.Downloads.Client
+	if err := validateDownloadURL(client.URL); err != nil {
+		return VanillaResult{}, fmt.Errorf("Minecraft client jar: %w", err)
+	}
+	if err := validateHash(hashSHA1, client.SHA1); err != nil {
+		return VanillaResult{}, fmt.Errorf("Minecraft client jar sha1 无效: %w", err)
+	}
+	if client.Size < 0 || client.Size > maxArtifactBytes {
+		return VanillaResult{}, fmt.Errorf("Minecraft client jar 声明大小 %d 非法", client.Size)
+	}
+	if err := add(artifact{
+		relPath: "versions/" + gameVersion + "/" + gameVersion + ".jar",
+		url:     client.URL,
+		kind:    hashSHA1,
+		sum:     client.SHA1,
+		size:    client.Size,
+		display: gameVersion,
+		label:   "game jar",
+	}); err != nil {
+		return VanillaResult{}, err
+	}
+
+	downloaded, skipped, err := downloadArtifacts(ctx, instanceDir, arts, o)
+	if err != nil {
+		return VanillaResult{}, err
+	}
+
+	o.progress.report("写入 Minecraft 版本 json")
+	if err := writeFileAtomic(instanceDir, "versions/"+gameVersion+"/"+gameVersion+".json", vanillaRaw); err != nil {
+		return VanillaResult{}, fmt.Errorf("写入 Minecraft 版本 json 失败: %w", err)
+	}
+
+	res := VanillaResult{
+		VersionID:  gameVersion,
+		Files:      len(arts),
+		Downloaded: downloaded,
+		Skipped:    skipped,
+	}
+	if vanilla.JavaVersion != nil {
+		res.JavaComponent = vanilla.JavaVersion.Component
+		res.JavaMajor = vanilla.JavaVersion.MajorVersion
+	}
+	return res, nil
+}
+
 func fabricArtifact(ctx context.Context, lib fabricLibrary, o options) (artifact, error) {
 	rel, err := mavenLibraryPath(lib.Name)
 	if err != nil {
