@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"mtl/internal/account"
 	"mtl/internal/assets"
@@ -18,8 +19,10 @@ import (
 	"mtl/internal/downloader"
 	"mtl/internal/fabric"
 	"mtl/internal/forge"
+	"mtl/internal/lastrun"
 	"mtl/internal/launch"
 	"mtl/internal/loader"
+	"mtl/internal/logging"
 	"mtl/internal/memory"
 	"mtl/internal/mrpack"
 	"mtl/internal/runtime"
@@ -49,6 +52,8 @@ func run(args []string) error {
 		return listCommand(args[1:])
 	case "info":
 		return infoCommand(args[1:])
+	case "diagnose":
+		return diagnoseCommand(args[1:])
 	case "account":
 		return accountCommand(args[1:])
 	case "config":
@@ -70,10 +75,12 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "用法:")
 	fmt.Fprintln(os.Stderr, "  mtl install --dir <实例目录> [--concurrency N] [--skip-loader] [--no-prune] [--mirror URL] [--mod-mirror URL] [--retries N] [--timeout 30s] [--log-mode summary|verbose] [--debug] <pack.mrpack>（整合包模式，支持 Fabric / Forge 1.20.1+）")
 	fmt.Fprintln(os.Stderr, "  mtl install --dir <实例目录> --mc <版本号> [--loader fabric|forge] [--loader-version <版本>] [--concurrency N] [--mirror URL] [--mod-mirror URL] [--retries N] [--timeout 30s] [--log-mode summary|verbose] [--debug]（纯净模板模式）")
-	fmt.Fprintln(os.Stderr, "  mtl run --dir <实例目录> [--account <账号>] [--username <名字>] [--memory <内存>] [--memory-auto] [--highperf-gpu|--no-highperf-gpu] [--java <java路径>] [--jvm-arg <参数>]... [--game-arg <参数>]... [--mirror URL] [--mod-mirror URL] [--retries N] [--timeout 30s] [--log-mode summary|verbose] [--debug]")
+	fmt.Fprintln(os.Stderr, "  mtl run --dir <实例目录> [--account <账号>] [--username <名字>] [--memory <内存>] [--memory-auto] [--highperf-gpu|--no-highperf-gpu] [--java <java路径>] [--jvm-arg <参数>]... [--game-arg <参数>]... [--mirror URL] [--mod-mirror URL] [--retries N] [--timeout 30s] [--log <debug|info|warn|error>] [--log-mode summary|verbose] [--debug]")
 	fmt.Fprintln(os.Stderr, "  mtl inspect [--extract <dir>] <pack.mrpack>")
 	fmt.Fprintln(os.Stderr, "  mtl list [--dir <实例根目录>]（默认 ./instances）")
 	fmt.Fprintln(os.Stderr, "  mtl info [--dir <实例根目录>] <实例名>")
+	fmt.Fprintln(os.Stderr, "  mtl diagnose [--dir <实例根目录>] <实例名>（诊断最近日志与崩溃报告）")
+	fmt.Fprintln(os.Stderr, "  mtl diagnose --last（诊断上一次运行的实例）")
 	fmt.Fprintln(os.Stderr, "  mtl account list")
 	fmt.Fprintln(os.Stderr, "  mtl account add <name>")
 	fmt.Fprintln(os.Stderr, "  mtl account rm <name>")
@@ -87,6 +94,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  mtl config reset --dir <实例目录>")
 	fmt.Fprintln(os.Stderr, "  mtl config global（显示全局配置路径与内容）")
 	fmt.Fprintln(os.Stderr, "  mtl config set-mirror <mojang|assets|libraries|version-meta|mod|fabric|forge> <镜像地址>")
+	fmt.Fprintln(os.Stderr, "  mtl config set-log-level <debug|info|warn|error>（全局终端日志级别）")
 	fmt.Fprintln(os.Stderr, "  mtl mod list --dir <实例目录> [--debug]")
 	fmt.Fprintln(os.Stderr, "  mtl mod enable|disable|rm <mod-id/文件名> --dir <实例目录>")
 	fmt.Fprintln(os.Stderr, "  mtl java list [--debug]")
@@ -461,7 +469,7 @@ func recordLoaderInfo(dir, loaderType, loaderVersion string, out io.Writer) erro
 	return nil
 }
 
-func runInstance(args []string) error {
+func runInstance(args []string) (retErr error) {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	dir := fs.String("dir", "", "实例目录（必填）")
 	accountName := fs.String("account", "", "已保存的离线账号；优先于实例默认账号和 --username")
@@ -471,7 +479,8 @@ func runInstance(args []string) error {
 	javaPath := fs.String("java", "", "java 可执行文件完整路径；不传则自动使用 Mojang 官方 Java 运行时")
 	highPerfGPU := fs.Bool("highperf-gpu", false, "本次启动强制优先使用高性能显卡（覆盖实例配置，仅 Windows 生效）")
 	noHighPerfGPU := fs.Bool("no-highperf-gpu", false, "本次启动强制关闭高性能显卡调度（覆盖实例配置）")
-	debug := fs.Bool("debug", false, "打印完整启动命令，并切换为 verbose 下载日志")
+	debug := fs.Bool("debug", false, "打印完整启动命令，并切换为 debug 日志与 verbose 下载日志")
+	logLevelFlag := fs.String("log", "", "终端日志级别：debug、info、warn、error；默认读取全局配置")
 	dl := addDownloadFlags(fs)
 	// --jvm-arg 与 --game-arg 分开收集：前者进 JVM 参数区，后者只进主类之后的游戏参数区。
 	var extraJVM stringList
@@ -506,73 +515,146 @@ func runInstance(args []string) error {
 		highPerfGPUValue = !*noHighPerfGPU
 	}
 	if fs.NArg() != 0 {
-		return fmt.Errorf("用法: mtl run --dir <实例目录> [--account <账号>] [--username <名字>] [--memory <内存>] [--memory-auto] [--highperf-gpu|--no-highperf-gpu] [--java <java路径>] [--jvm-arg <参数>]... [--game-arg <参数>]... [--debug]")
+		return fmt.Errorf("用法: mtl run --dir <实例目录> [--account <账号>] [--username <名字>] [--memory <内存>] [--memory-auto] [--highperf-gpu|--no-highperf-gpu] [--java <java路径>] [--jvm-arg <参数>]... [--game-arg <参数>]... [--log <debug|info|warn|error>] [--debug]")
 	}
 	if *dir == "" {
 		return fmt.Errorf("必须用 --dir 指定实例目录")
+	}
+	absDir, err := filepath.Abs(*dir)
+	if err != nil {
+		return fmt.Errorf("解析实例目录失败: %w", err)
 	}
 	settings, err := resolveDownloadSettings(fs, dl, 0, *debug)
 	if err != nil {
 		return err
 	}
-
-	// 实例配置优先级低于命令行：--memory 覆盖实例内存设置，--memory-auto 强制自动内存；
-	// --highperf-gpu/--no-highperf-gpu 覆盖实例的高性能显卡设置。
-	instanceCfg := loadInstanceConfig(*dir)
-	memChoice := config.EffectiveMemory(instanceCfg, *memoryValue, memorySet, *memoryAuto)
-	preferHighPerfGPU, gpuSource := config.EffectiveHighPerfGPU(instanceCfg, highPerfGPUValue, highPerfCLISet)
-	if *debug {
-		fmt.Fprintf(os.Stdout, "[Config] 实例配置文件: %s\n", configPathForLog(*dir))
-		fmt.Fprintf(os.Stdout, "[Config] 读取到的实例配置:\n%s\n", config.Format(instanceCfg))
-		fmt.Fprintf(os.Stdout, "[Config] 内存来源: %s\n", memChoice.Source)
-		fmt.Fprintf(os.Stdout, "[Config] 高性能显卡调度: %v（来源: %s）\n", preferHighPerfGPU, gpuSource)
-		fmt.Fprintf(os.Stdout, "[Config] 下载日志模式: %s，并发: %d，重试: %d\n",
-			logModeName(settings.LogMode), settings.Concurrency, settings.Retries)
-	}
-	mem, err := resolveMemory(memChoice.Value, memChoice.Auto, memChoice.ValueSet, os.Stdout, os.Stderr)
+	level, err := resolveRunLogLevel(*logLevelFlag, *debug)
 	if err != nil {
 		return err
 	}
+
+	// 每次 run 单独创建日志文件；创建失败只告警，终端日志仍然可用。
+	var logFile *os.File
+	logPath := ""
+	dirReady := false
+	if info, statErr := os.Stat(absDir); statErr != nil || !info.IsDir() {
+		fmt.Fprintf(os.Stderr, "[Log] 警告: 实例目录不可用，跳过日志文件: %s\n", absDir)
+	} else {
+		dirReady = true
+		if f, p, openErr := logging.OpenInstanceLog(absDir, time.Now()); openErr != nil {
+			fmt.Fprintf(os.Stderr, "[Log] 警告: 创建实例日志文件失败: %v（仅输出到终端）\n", openErr)
+		} else {
+			logFile, logPath = f, p
+		}
+	}
+	logger := logging.New(logging.Options{
+		Console: os.Stdout,
+		Level:   level,
+		File:    logFile,
+	})
+
+	// 记录本次运行的起止状态，供 mtl diagnose --last 使用。
+	rec := lastrun.Record{
+		InstanceDir:  absDir,
+		InstanceName: filepath.Base(filepath.Clean(absDir)),
+		LogFile:      logPath,
+		StartedAt:    time.Now(),
+	}
+	var (
+		processExit    *int
+		processPID     int
+		processStart   time.Time
+		processStarted bool
+	)
+	// 实例目录无效时不写记录，避免一次手误覆盖掉可用于 --last 的干净状态。
+	if dirReady {
+		if saveErr := lastrun.Save(rec); saveErr != nil {
+			logger.Warn("run", "写入上次运行记录失败: %v", saveErr)
+		}
+	}
+	defer func() {
+		ended := time.Now()
+		rec.EndedAt = &ended
+		rec.ExitCode = processExit
+		rec.ProcessPID = processPID
+		if retErr != nil && !errors.Is(retErr, context.Canceled) {
+			logger.Error("run", "启动失败: %v", retErr)
+		}
+		if dirReady {
+			if saveErr := lastrun.Save(rec); saveErr != nil {
+				logger.Warn("run", "更新上次运行记录失败: %v", saveErr)
+			}
+		}
+		logger.Info("run", "mtl 运行结束")
+		if logFile != nil {
+			_ = logFile.Close()
+		}
+	}()
+
+	logger.Info("run", "实例: %s（%s）", rec.InstanceName, absDir)
+	logger.Info("run", "终端日志级别: %s", level.Name())
+	if logPath != "" {
+		logger.Info("run", "日志文件: %s", logPath)
+	}
+
+	// 实例配置优先级低于命令行：--memory 覆盖实例内存设置，--memory-auto 强制自动内存；
+	// --highperf-gpu/--no-highperf-gpu 覆盖实例的高性能显卡设置。
+	instanceCfg := loadInstanceConfig(absDir)
+	memChoice := config.EffectiveMemory(instanceCfg, *memoryValue, memorySet, *memoryAuto)
+	preferHighPerfGPU, gpuSource := config.EffectiveHighPerfGPU(instanceCfg, highPerfGPUValue, highPerfCLISet)
+	logger.Debug("config", "实例配置文件: %s", configPathForLog(absDir))
+	logger.Debug("config", "读取到的实例配置:\n%s", config.Format(instanceCfg))
+	logger.Debug("config", "内存来源: %s", memChoice.Source)
+	logger.Debug("config", "高性能显卡调度: %v（来源: %s）", preferHighPerfGPU, gpuSource)
+	logger.Debug("download", "下载日志模式: %s，并发: %d，重试: %d",
+		logModeName(settings.LogMode), settings.Concurrency, settings.Retries)
+	mem, err := resolveMemory(memChoice.Value, memChoice.Auto, memChoice.ValueSet, logger.RawWriter(), logger.RawWriter())
+	if err != nil {
+		return err
+	}
+	logger.Info("run", "内存配置: -Xms%s -Xmx%s（来源: %s）", mem.Min, mem.Max, memChoice.Source)
 
 	// 配置参数在前，命令行参数追加在后；其余启动流程保持不变。
 	jvmArgs := config.MergeArgs(instanceCfg.JVMArgs, extraJVM)
 	gameArgs := config.MergeArgs(instanceCfg.GameArgs, extraGame)
-	if *debug {
-		fmt.Fprintf(os.Stdout, "[Config] 合并后的 JVM 参数（%d 项）: %q\n", len(jvmArgs), jvmArgs)
-		fmt.Fprintf(os.Stdout, "[Config] 合并后的游戏参数（%d 项）: %q\n", len(gameArgs), gameArgs)
-	}
+	logger.Debug("config", "合并后的 JVM 参数（%d 项）: %q", len(jvmArgs), jvmArgs)
+	logger.Debug("config", "合并后的游戏参数（%d 项）: %q", len(gameArgs), gameArgs)
 
 	store, storeErr := account.OpenDefault()
 	name, uuid, accountSource, err := selectAccount(*accountName, *username, usernameSet,
-		instanceCfg.DefaultAccount, store, storeErr, os.Stdout, os.Stderr)
+		instanceCfg.DefaultAccount, store, storeErr, io.Discard, logger.RawWriter())
 	if err != nil {
 		return err
 	}
-	if *debug {
-		fmt.Fprintf(os.Stdout, "[Config] 账号: %s（来源: %s）\n", name, accountSource)
-	}
+	logger.Info("account", "使用离线账号: %s (%s)，来源: %s", name, uuid, accountSource)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	inst, err := launch.Load(*dir)
+	inst, err := launch.Load(absDir)
 	if err != nil {
 		return err
+	}
+	rec.MinecraftVersion = inst.GameVersion
+	logger.Info("run", "版本: %s（Minecraft %s）", inst.ProfileID, inst.GameVersion)
+	if instanceCfg.LoaderType != "" {
+		logger.Info("run", "加载器: %s %s", instanceCfg.LoaderType, instanceCfg.LoaderVersion)
+	}
+	if len(inst.Mods) > 0 {
+		logger.Info("mod", "ClassPath 中的 Mod 文件: %d 个", len(inst.Mods))
 	}
 
 	// Java 优先级：命令行 --java > 实例配置 java（需仍真实存在）
 	// > 全局默认（mtl java use）> 全局缓存自动匹配下载。
 	resolvedJava, javaSource := resolveConfiguredJava(*javaPath, instanceCfg)
 	if resolvedJava == "" && strings.TrimSpace(instanceCfg.Java) != "" {
-		fmt.Fprintf(os.Stdout, "[run] 实例配置中的 Java 路径已失效，重新选择 Java: %s\n", instanceCfg.Java)
+		logger.Warn("java", "实例配置中的 Java 路径已失效，重新选择 Java: %s", instanceCfg.Java)
 	}
 	if resolvedJava == "" {
 		if p, id, ok := resolveGlobalJava(); ok {
 			resolvedJava = p
 			javaSource = javaSourceGlobal
-			if *debug {
-				fmt.Fprintf(os.Stdout, "[Config] 全局默认 Java 运行时: %s（%s）\n", id, p)
-			}
+			logger.Debug("java", "全局默认 Java 运行时: %s（%s）", id, p)
 		}
 	}
 	if resolvedJava == "" {
@@ -581,13 +663,16 @@ func runInstance(args []string) error {
 			spec.Component = inst.Vanilla.JavaVersion.Component
 			spec.MajorVersion = inst.Vanilla.JavaVersion.MajorVersion
 		}
+		if rd, rdErr := runtime.DefaultDir(); rdErr == nil {
+			logger.Debug("runtime", "缓存目录: %s", rd)
+		}
 		resolvedJava, err = runtime.Ensure(ctx, spec, runtime.Options{
 			Concurrency: settings.Concurrency,
 			Retries:     settings.Retries,
 			Timeout:     settings.Timeout,
 			Mirrors:     settings.Mirrors,
 			Progress: func(msg string) {
-				fmt.Fprintf(os.Stdout, "[Runtime] %s\n", msg)
+				logger.Info("runtime", "%s", msg)
 			},
 		})
 		if err != nil {
@@ -598,15 +683,14 @@ func runInstance(args []string) error {
 		}
 		javaSource = javaSourceRuntime
 	}
-	fmt.Fprintf(os.Stdout, "[run] Java运行时来源：%s\n", javaSource)
-	if *debug {
-		fmt.Fprintf(os.Stdout, "[Runtime] Java 路径: %s\n", resolvedJava)
-	}
+	logger.Info("java", "运行时来源: %s", javaSource)
+	logger.Info("java", "Java 路径: %s", resolvedJava)
 
 	assetsDir, err := assets.DefaultDir()
 	if err != nil {
 		return err
 	}
+	logger.Debug("assets", "缓存目录: %s", assetsDir)
 	if err := assets.Ensure(ctx, assets.IndexSpec{
 		ID:   inst.Vanilla.AssetIndex.ID,
 		URL:  inst.Vanilla.AssetIndex.URL,
@@ -619,7 +703,7 @@ func runInstance(args []string) error {
 		Mirrors:     settings.Mirrors,
 		LogMode:     settings.LogMode,
 		Progress: func(msg string) {
-			fmt.Fprintf(os.Stdout, "[Assets] %s\n", msg)
+			logger.Info("assets", "%s", msg)
 		},
 	}); err != nil {
 		if errors.Is(err, context.Canceled) {
@@ -630,13 +714,13 @@ func runInstance(args []string) error {
 
 	// 崩溃归档：启动前记录已有日志，游戏退出后只处理本次新增或变化的 crash-*.txt。
 	// 目录创建或归档失败只告警，不影响启动。
-	if mkErr := crash.EnsureArchiveDir(*dir); mkErr != nil {
-		fmt.Fprintf(os.Stderr, "[Crash] 归档崩溃日志失败: %v\n", mkErr)
+	if mkErr := crash.EnsureArchiveDir(absDir); mkErr != nil {
+		logger.Warn("crash", "归档崩溃日志失败: %v", mkErr)
 	}
-	crashBaseline := crash.TakeSnapshot(*dir)
+	crashBaseline := crash.TakeSnapshot(absDir)
 
 	err = launch.Run(ctx, launch.Options{
-		InstanceDir:       *dir,
+		InstanceDir:       absDir,
 		Username:          name,
 		UUID:              uuid,
 		JavaPath:          resolvedJava,
@@ -646,36 +730,50 @@ func runInstance(args []string) error {
 		ExtraGameArgs:     gameArgs,
 		PreferHighPerfGPU: preferHighPerfGPU,
 		Debug:             *debug,
-		Out:               os.Stdout,
-		ErrOut:            os.Stderr,
+		Out:               logger.RawWriter(),
+		ErrOut:            logger.RawWriter(),
+		OnProcessStart: func(pid int) {
+			processStarted = true
+			processPID = pid
+			processStart = time.Now()
+			logger.Info("process", "子进程 PID: %d，启动时间: %s", pid, processStart.Format("2006-01-02 15:04:05"))
+		},
+		OnProcessExit: func(code int) {
+			c := code
+			processExit = &c
+			duration := time.Duration(0)
+			if processStarted {
+				duration = time.Since(processStart)
+			}
+			logger.Info("process", "子进程退出码: %d，退出时间: %s，运行时长: %s",
+				code, time.Now().Format("2006-01-02 15:04:05"), duration.Round(time.Second))
+		},
 	})
 
 	// 仅在 Java 进程成功运行并正常退出后回填路径；启动失败或中途崩溃保持配置原样。
 	// --java 为命令行临时覆盖，不写入实例配置。
 	if err == nil && shouldPersistJava(javaSource) {
-		changed, saveErr := persistInstanceJava(*dir, resolvedJava)
+		changed, saveErr := persistInstanceJava(absDir, resolvedJava)
 		switch {
 		case saveErr != nil:
-			fmt.Fprintf(os.Stderr, "[run] 警告: 保存Java路径到实例配置失败: %v\n", saveErr)
+			logger.Warn("java", "保存 Java 路径到实例配置失败: %v", saveErr)
 		case changed:
-			fmt.Fprintf(os.Stdout, "[run] 已自动保存Java路径到实例配置: %s\n", resolvedJava)
+			logger.Info("java", "已自动保存 Java 路径到实例配置: %s", resolvedJava)
 		}
 	}
 
 	// 游戏进程退出（无论正常还是崩溃）后归档并诊断本次崩溃日志；没有新日志时保持静默。
-	reports, crashWarnings := crash.Collect(crash.Options{InstanceDir: *dir, Baseline: crashBaseline})
+	reports, crashWarnings := crash.Collect(crash.Options{InstanceDir: absDir, Baseline: crashBaseline})
 	for _, w := range crashWarnings {
-		fmt.Fprintf(os.Stderr, "[Crash] 归档崩溃日志失败: %s\n", w)
+		logger.Warn("crash", "归档崩溃日志失败: %s", w)
 	}
 	for _, r := range reports {
-		if *debug {
-			fmt.Fprintf(os.Stdout, "[Crash] 扫描到崩溃日志: %s\n", r.Source)
-			if r.Archived != "" {
-				fmt.Fprintf(os.Stdout, "[Crash] 已归档: %s\n", r.Archived)
-			}
+		logger.Debug("crash", "扫描到崩溃日志: %s", r.Source)
+		if r.Archived != "" {
+			logger.Debug("crash", "已归档: %s", r.Archived)
 		}
 		for _, d := range r.Diagnoses {
-			fmt.Fprintf(os.Stdout, "[Crash] %s\n", d)
+			logger.Info("crash", "%s", d)
 		}
 	}
 

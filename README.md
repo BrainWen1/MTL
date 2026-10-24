@@ -21,7 +21,8 @@ MTL 是自用项目，不是成熟的发行版启动器。功能按实际需要�
 - **JVM / 游戏参数配置**：可写入实例配置，也可在命令行单次追加；JVM 参数与游戏参数严格分离。
 - **Windows 高性能显卡调度**：为 Java 可执行文件写入 `HKCU` 显卡首选项，并追加 D3D 参数；设置失败只告警，不影响启动。
 - **离线账号**：全局保存离线账号（用户名 + 离线 UUID），实例可绑定默认账号，`--account` 可临时切换；同一台机器可用多个账号进行局域网联机。
-- **崩溃日志归档与诊断**：每次启动后自动归档新增崩溃日志，并用离线关键词规则给出 Mod 冲突提示。
+- **启动日志增强**：`mtl run` 使用统一分级日志（`debug` / `info` / `warn` / `error`），带时间戳与模块标识；终端默认保持简洁，每次启动额外在实例 `logs/run-YYYYMMDD-HHMM.log` 落盘完整链路（账号、版本、Java、内存、启动参数、PID、退出码）。日志级别可用 `mtl config set-log-level` 全局设置，或 `mtl run --log debug` 临时提升。
+- **崩溃诊断**：每次启动后自动归档新增崩溃日志；`mtl diagnose <实例名>` 读取最近运行日志与崩溃报告，离线识别 OOM、Mod 解析失败/重复/依赖缺失/版本不兼容、Java 版本与路径异常、assets/本地库缺失等常见问题，输出带置信度的结论、可疑问题与修复建议；`mtl diagnose --last` 可直接诊断上一次运行的实例。
 - **整合包查看**：`mtl inspect` 可在安装前查看整合包信息，按需解压 overrides。
 - **实例列表与健康检查**：`mtl list` 只读扫描实例根目录，用表格展示加载器、默认账号和 Java 状态；`mtl info` 展示完整配置与健康检查报告。
 - **本地 Mod 管理**：`mtl mod list|enable|disable|rm` 离线读取 Fabric / Forge 元数据（含嵌套 jar 子模块），展示名称、版本、id、加载器与依赖；禁用只把 jar 移动到 `mods/disabled/`，不修改文件内容，可随时恢复。
@@ -33,7 +34,7 @@ MTL 是自用项目，不是成熟的发行版启动器。功能按实际需要�
 - Forge 安装依赖 Forge 官方 Maven 与 installer，首次安装耗时较长，网络受限时可能失败。
 - 仅有离线账号体系，不接入微软正版登录；启动参数中的 access token 固定为 `0`，用户类型为 `legacy`。
 - 高性能显卡调度仅 Windows 生效，其他平台静默跳过。
-- 崩溃诊断是**静态关键词匹配**，只能覆盖常见模式；复杂崩溃、混淆堆栈或非 Mod 问题仍需人工查看原始日志。
+- 崩溃诊断是**离线静态关键词匹配**，只能覆盖常见模式（OOM、Mod 冲突、Java 版本、资源缺失等）；显卡驱动、复杂混淆堆栈等问题仍需人工查看原始日志或崩溃报告。
 - 增量清理只识别 mrpack 安装写入 `.mtl/pack-lock.json` 的托管文件；旧实例首次重新安装不会清理历史文件，只会从本次安装开始建立锁定清单。
 - 纯净模板实例不生成 pack-lock，也不参与整合包清理；其中的 mod、配置与存档完全由用户手动管理。
 - 清理前会校验文件哈希，用户修改过的旧托管文件会保留；`saves/` 与 `.mtl/` 永远不参与清理。
@@ -199,7 +200,7 @@ mtl run --dir <实例目录> [--account <账号>] [--username <名字>] [--memor
         [--memory-auto] [--highperf-gpu|--no-highperf-gpu] [--java <路径>] \
         [--jvm-arg <参数>]... [--game-arg <参数>]... \
         [--mirror URL] [--mod-mirror URL] [--retries N] [--timeout 30s] \
-        [--log-mode summary|verbose] [--debug]
+        [--log-mode summary|verbose] [--log debug|info|warn|error] [--debug]
 ```
 
 | 参数 | 说明 |
@@ -219,7 +220,8 @@ mtl run --dir <实例目录> [--account <账号>] [--username <名字>] [--memor
 | `--retries N` | 下载失败后的额外重试次数；`0` 使用配置值，`-1` 表示不重试 |
 | `--timeout <时长>` | 单文件下载超时，例如 `30s`、`2m` |
 | `--log-mode <模式>` | 下载日志粒度：`summary`（默认）或 `verbose` |
-| `--debug` | 打印配置来源、完整启动命令和调试信息，并切换为 `verbose` 下载日志 |
+| `--log <级别>` | 本次启动的终端日志级别：`debug`、`info`、`warn`、`error`；优先级高于全局配置 |
+| `--debug` | 打印配置来源、完整启动命令和调试信息，并切换为 `verbose` 下载日志；未显式指定 `--log` 时同时使用 `debug` 级别 |
 
 示例：
 
@@ -229,6 +231,7 @@ mtl run --dir <实例目录> [--account <账号>] [--username <名字>] [--memor
 ./mtl run --dir ./instances/demo --memory 6G --jvm-arg "-XX:+UseG1GC"
 ./mtl run --dir ./instances/demo --game-arg "--width" --game-arg "1280"
 ./mtl run --dir ./instances/demo --java "C:\Java\jdk-21\bin\java.exe" --debug
+./mtl run --dir ./instances/demo --log debug      # 本次临时输出详细日志
 ```
 
 说明：
@@ -240,6 +243,58 @@ mtl run --dir <实例目录> [--account <账号>] [--username <名字>] [--memor
 - 游戏成功运行结束后，本次自动匹配或实例配置选中的 Java 绝对路径会回填到实例配置（与已有值相同则跳过）；启动失败或中途崩溃不会修改配置。
 - `--java` 只对本次启动临时生效，不会写入实例配置；全局默认同样不回填，保证之后 `mtl java use` 切换仍对该实例生效。
 - `Ctrl+C` 会转发给游戏进程；10 秒内未退出则强制结束。
+
+日志说明：
+
+- 每次启动都会在 `<实例目录>/logs/` 新建独立文件，命名为 `run-YYYYMMDD-HHMM.log`；同一分钟重复启动会自动追加 `-2`、`-3` 后缀，不覆盖旧日志。
+- 终端按日志级别过滤，默认 `info`；日志文件始终记录 `debug` 及以上，因此排查时无需重新运行也能看到完整参数与下载细节。
+- 日志级别优先级：`--log` > `--debug` > 环境变量 `MTL_LOG_LEVEL` > 全局配置 `log_level` > `info`。
+- 日志包含实例名、账号、Minecraft/加载器版本、Java 来源与路径、内存配置、JVM/游戏参数、缓存目录、资源准备进度、子进程 PID、开始/结束时间与退出码。日志只记录启动器自身流程，不做额外脱敏。
+
+### mtl diagnose
+
+诊断实例最近一次启动：读取最新运行日志与最新崩溃报告，用离线规则给出结论和修复建议。
+
+```bash
+mtl diagnose <实例名> [--dir <实例根目录>]
+mtl diagnose --last
+```
+
+| 参数 | 说明 |
+| --- | --- |
+| `<实例名>` | 实例根目录下的单层目录名 |
+| `--dir <实例根目录>` | 实例根目录，默认 `./instances` |
+| `--last` | 诊断上一次 `mtl run` 的实例，读取全局 `last-run.json` 记录；不能与实例名同时使用 |
+
+示例：
+
+```bash
+./mtl diagnose demo
+./mtl diagnose --dir ./instances demo
+./mtl diagnose --last          # 刚崩溃退出后直接执行
+```
+
+诊断报告包含：
+
+- 实例、目录、加载器版本、实际读取的日志/崩溃报告路径与退出码。
+- 摘要：是否崩溃、退出原因预判与置信度。
+- 可疑问题列表：严重程度、置信度、说明、纯文字修复建议与命中的关键日志行。
+- 崩溃时附崩溃栈关键行，便于直接定位异常入口。
+
+当前规则覆盖：
+
+- 退出码：正常退出、手动关闭（`Ctrl+C`）、强制结束、Windows 访问冲突/栈溢出/异常终止等。
+- 内存不足：`OutOfMemoryError`、`Java heap space`、`GC overhead limit exceeded`。
+- Mod 问题：依赖解析失败、`fabric.mod.json` 解析失败/文件损坏、重复 Mod id、缺少前置依赖、Mod 与 Minecraft 版本不兼容、Mixin 注入冲突。
+- 环境问题：Java 版本不匹配、Java 路径不可用、JVM 参数/内存设置无效、assets 缺失、本地库（native）缺失、类缺失。
+
+说明：
+
+- 日志与崩溃报告同时存在时都会参与匹配；运行日志优先使用上一次运行记录的文件，否则选择 `logs/` 下最新的 `run-*.log`。
+- 崩溃报告优先读取 Minecraft 原始 `crash-reports/crash-*.txt`；没有时才回退到 MTL 归档的 `crash_reports/`，并自动忽略归档摘要，避免二次误报。
+- 若最近的崩溃报告明显早于本次运行日志，则只展示路径、不参与关键词匹配，避免历史崩溃把正常退出误判为崩溃。
+- 没有日志或崩溃报告时只输出友好提示，不会报错或 panic；诊断失败不会影响正常启动。
+- 关键词匹配存在误报/漏报，复杂崩溃仍需查看完整日志。
 
 ### mtl inspect
 
@@ -451,6 +506,7 @@ mtl config remove-game-arg --dir <实例目录> <参数>
 mtl config reset --dir <实例目录>
 mtl config global（显示全局配置）
 mtl config set-mirror <类型> <镜像地址>（传空字符串恢复官方源）
+mtl config set-log-level <debug|info|warn|error>
 ```
 
 | 子命令 | 说明 |
@@ -469,6 +525,7 @@ mtl config set-mirror <类型> <镜像地址>（传空字符串恢复官方源�
 | `reset` | 将实例配置重置为默认值（包括解绑默认账号） |
 | `global` | 显示全局配置路径与内容（镜像源、下载日志模式、默认 Java 等） |
 | `set-mirror <类型> <地址>` | 修改全局镜像；类型：`mojang`、`assets`、`libraries`、`version-meta`、`mod`、`fabric`、`forge` |
+| `set-log-level <级别>` | 设置 `mtl run` 的终端日志级别：`debug`、`info`、`warn`、`error`；实例日志文件始终记录 `debug` |
 
 示例：
 
@@ -487,6 +544,7 @@ mtl config set-mirror <类型> <镜像地址>（传空字符串恢复官方源�
 ./mtl config global
 ./mtl config set-mirror mojang https://mirror.example/mc
 ./mtl config set-mirror mojang ""     # 恢复官方源
+./mtl config set-log-level debug
 ```
 
 #### 全局配置与下载层
@@ -514,15 +572,18 @@ mtl config set-mirror <类型> <镜像地址>（传空字符串恢复官方源�
     "timeout": "30s",
     "concurrency": 4
   },
-  "default_java": "java-runtime-gamma"
+  "default_java": "java-runtime-gamma",
+  "log_level": "info"
 }
 ```
 
 `default_java` 是 `mtl java use` 写入的全局默认运行时标识（缓存目录名），省略或为空表示未设置；只保存标识而不保存绝对路径，便于跨平台迁移缓存目录。
 
+`log_level` 控制 `mtl run` 的终端日志级别，默认 `info`。实例日志文件始终记录 `debug` 及以上，不受该值影响。
+
 优先级：**命令行参数 > 环境变量 > 全局配置文件 > 默认官方源**。镜像只替换域名（以及镜像自带的前缀路径），资源路径保持不变；镜像请求失败后自动回退原始官方地址。
 
-环境变量：`MTL_MOJANG_MIRROR`、`MTL_ASSETS_MIRROR`、`MTL_LIBRARIES_MIRROR`、`MTL_VERSION_META_MIRROR`、`MTL_MOD_MIRROR`、`MTL_FABRIC_MIRROR`、`MTL_FORGE_MIRROR`、`MTL_DOWNLOAD_LOG`、`MTL_DOWNLOAD_RETRIES`、`MTL_DOWNLOAD_TIMEOUT`、`MTL_DOWNLOAD_CONCURRENCY`。
+环境变量：`MTL_MOJANG_MIRROR`、`MTL_ASSETS_MIRROR`、`MTL_LIBRARIES_MIRROR`、`MTL_VERSION_META_MIRROR`、`MTL_MOD_MIRROR`、`MTL_FABRIC_MIRROR`、`MTL_FORGE_MIRROR`、`MTL_DOWNLOAD_LOG`、`MTL_DOWNLOAD_RETRIES`、`MTL_DOWNLOAD_TIMEOUT`、`MTL_DOWNLOAD_CONCURRENCY`、`MTL_LOG_LEVEL`。
 
 下载失败会继续处理其他文件，最后按「网络失败 / 哈希校验失败 / 不支持断点续传 / 本地文件错误」汇总；中断后重新执行同一命令会从 `*.tmp` 继续下载。
 
@@ -564,7 +625,7 @@ instances/
     ├── libraries/               # 游戏库与 Fabric / Forge loader 库
     ├── versions/                # 原版版本 json/jar 与加载器 profile
     ├── launcher_profiles.json   # Forge installer 前置文件；纯净模板也会生成最小骨架
-    ├── logs/
+    ├── logs/                    # 游戏日志；每次 mtl run 额外生成 run-YYYYMMDD-HHMM.log
     ├── saves/
     └── ...                      # resourcepacks、data、downloads 等由整合包决定
 ```
@@ -589,6 +650,11 @@ Linux / macOS：`~/.cache/mtl/` 下为相同结构。
 - `runtime/` 与 `assets/` 由所有实例共享，可安全复用。
 - 账号数据单独放在 `accounts/`，与实例、runtime、assets 隔离。
 - 删除 `runtime/` 或 `assets/` 只会导致下次重新下载，不会损坏已有实例。
+
+全局配置目录（`%APPDATA%/mtl/` 或 `~/.config/mtl/`）中另有：
+
+- `config.json`：全局配置。
+- `last-run.json`：上一次 `mtl run` 的实例目录、日志文件、PID、起止时间与退出码，供 `mtl diagnose --last` 使用；可用 `MTL_LAST_RUN_PATH` 覆盖路径。
 
 ## 📝 实例配置 config.json 字段说明
 
@@ -631,6 +697,10 @@ Linux / macOS：`~/.cache/mtl/` 下为相同结构。
 
 ## 🧪 崩溃诊断说明
 
+MTL 的崩溃诊断分为两部分：`mtl run` 结束后的**自动归档 + 快速提示**，以及 `mtl diagnose` 的**事后完整报告**。
+
+### 自动归档
+
 `mtl run` 在游戏进程退出后执行一次崩溃归档：
 
 1. 启动前记录 `crash-reports/` 与 `.minecraft/crash-reports/` 中已有崩溃日志的状态。
@@ -638,21 +708,21 @@ Linux / macOS：`~/.cache/mtl/` 下为相同结构。
 3. 将日志复制到实例的 `crash_reports/`，文件名格式为 `crash-<UTC时间戳>-<原文件名>.txt`。
 4. 在归档文件顶部追加诊断摘要，同时在终端输出 `[Crash]` 提示。
 
-诊断基于**离线关键词扫描**，当前覆盖：
+原有归档诊断保留渲染类 Mod 冲突等关键词规则；归档或诊断失败只告警，不会阻断启动流程。
 
-- Mixin 注入冲突（`mixin apply failed`、`mixin injection`）
-- 重复 Mod（`mod id already registered`、`duplicate mod id`）
-- 缺少前置依赖（`requires mod`、`dependency not found`、`missing dependency`）
-- 类缺失（`NoClassDefFoundError` 附近出现 mod / fabric / mixin 等标识）
-- Minecraft 版本不兼容（`wrong minecraft version`、`minecraft version mismatch`）
-- 渲染类 Mod 冲突（oculus、rubidium、embeddium、magnesium、optifine、optifabric、canvas 等）
-- 全部未命中时输出兜底提示，建议直接查看原始日志
+### mtl diagnose
+
+`mtl diagnose` 不依赖归档文件，直接读取实例最新的 `logs/run-*.log` 与 `crash-reports/crash-*.txt`，规则更完整，详见上文 [mtl diagnose](#mtl-diagnose)。与自动归档相比：
+
+- 自动归档只在上次运行后立即提示，适合「刚崩完看一眼」。
+- `mtl diagnose` 可随时重跑、可指定实例、可用 `--last`，输出退出原因预判、置信度、可疑问题与修复建议。
+- 两者都是**离线关键词匹配**，不可能覆盖所有崩溃；复杂问题仍需人工查看完整日志。
 
 适用场景与局限：
 
-- 适合快速定位 Fabric / Forge 整合包最常见的启动崩溃。
+- 适合快速定位 Fabric / Forge 整合包最常见的启动崩溃（OOM、Mod 冲突、Java 版本、资源缺失等）。
 - 关键词匹配可能误报（例如日志中的 Mod 列表恰好包含相关词），也可能漏报。
-- 深度混淆堆栈、显卡/驱动问题、内存不足、Java 版本问题不在诊断范围内。
+- 显卡驱动、复杂混淆堆栈、硬件问题等仍需人工分析。
 - 归档或诊断失败只告警，不会阻断启动流程。
 
 ## 📄 .gitignore 说明
@@ -685,7 +755,10 @@ Linux / macOS：`~/.cache/mtl/` 下为相同结构。
 - `internal/instance`：实例根目录只读扫描、Java 路径状态与健康检查
 - `internal/account`：离线账号、用户名校验、离线 UUID
 - `internal/memory`：内存值解析、校验与自动推荐
-- `internal/crash`：崩溃日志归档与离线诊断
+- `internal/crash`：崩溃日志归档与原有离线诊断
+- `internal/logging`：分级日志、终端/文件双阈值、实例独立运行日志创建
+- `internal/lastrun`：最近一次运行状态（实例、日志、PID、退出码）持久化，供 `diagnose --last`
+- `internal/diagnose`：日志/崩溃报告发现、退出码分类、关键词规则与诊断报告
 
 开发约定：
 
@@ -736,9 +809,10 @@ go test ./...
 5. ✅ **全局 Java 运行时管理（已实现）**
    - `mtl java list|use|prune`：查看缓存运行时、设置全局默认 Java、清理未被任何实例引用的版本。
    - 优先级与现有实例 `java` 字段、`--java` 保持一致；`prune` 保护被实例或全局默认引用的运行时。
-6. **崩溃诊断与启动日志增强**
-   - 每次启动落盘独立日志，保留最近 N 次；崩溃摘要附带 Mod 列表快照。
-   - 补充 Java 版本不匹配、内存不足（OOM）、显卡驱动等离线规则。
+6. ✅ **崩溃诊断与启动日志增强（已实现）**
+   - 每次启动落盘独立日志 `logs/run-YYYYMMDD-HHMM.log`，终端与文件分级过滤，记录账号、版本、Java、内存、参数、PID 与退出码。
+   - 新增 `mtl diagnose <实例名>` / `--last`：汇总最近日志与崩溃报告，覆盖 OOM、Mod 解析/重复/依赖/版本冲突、Mixin、Java 版本与路径、assets/本地库缺失等离线规则。
+   - 后续可补充 Mod 列表快照与显卡驱动规则。
 7. **实例备份与恢复**
    - `mtl backup --dir <目录> [--include mods|config|saves|all]`，输出可恢复的压缩包。
    - 支持启动前自动备份存档，避免整合包更新或崩溃损坏世界。

@@ -140,14 +140,45 @@ func TestNormalizeGlobalKeepsValidFields(t *testing.T) {
 	}
 }
 
+func TestGlobalLogLevel(t *testing.T) {
+	isolateGlobalConfig(t)
+	cfg, err := LoadGlobal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LogLevel != "info" {
+		t.Fatalf("默认 log_level = %q, want info", cfg.LogLevel)
+	}
+
+	cfg, err = NormalizeGlobal(Global{LogLevel: "DEBUG"})
+	if err != nil {
+		t.Fatalf("合法日志级别不应报错: %v", err)
+	}
+	if cfg.LogLevel != "debug" {
+		t.Fatalf("log_level 未规范化: %q", cfg.LogLevel)
+	}
+
+	cfg, err = NormalizeGlobal(Global{LogLevel: "loud"})
+	if err == nil {
+		t.Fatal("非法日志级别应报错")
+	}
+	if cfg.LogLevel != "info" {
+		t.Fatalf("非法日志级别应回退 info: %q", cfg.LogLevel)
+	}
+}
+
 func TestGlobalFromEnv(t *testing.T) {
 	t.Setenv("MTL_MOJANG_MIRROR", " https://env.example/mc ")
 	t.Setenv("MTL_DOWNLOAD_LOG", LogModeVerbose)
 	t.Setenv("MTL_DOWNLOAD_RETRIES", "1")
 	t.Setenv("MTL_DOWNLOAD_CONCURRENCY", "6")
 	t.Setenv("MTL_DOWNLOAD_TIMEOUT", "45s")
+	t.Setenv("MTL_LOG_LEVEL", "error")
 
 	cfg := GlobalFromEnv(DefaultGlobal())
+	if cfg.LogLevel != "error" {
+		t.Fatalf("环境变量 MTL_LOG_LEVEL 未生效: %q", cfg.LogLevel)
+	}
 	if cfg.Mirrors.Mojang != "https://env.example/mc" {
 		t.Fatalf("Mojang 镜像 = %q", cfg.Mirrors.Mojang)
 	}

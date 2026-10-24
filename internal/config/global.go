@@ -12,6 +12,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"mtl/internal/logging"
 )
 
 const (
@@ -33,6 +35,9 @@ type Global struct {
 	// DefaultJava 是 mtl java use 设置的全局默认 Java 运行时标识（runtime 缓存目录名）。
 	// 仅在命令行未传 --java 且实例配置未指定 java 时生效；不保存可执行文件绝对路径。
 	DefaultJava string `json:"default_java,omitempty"`
+	// LogLevel 是终端日志级别：debug / info / warn / error，默认 info。
+	// 实例日志文件始终记录 debug 及以上，不受该选项影响。
+	LogLevel string `json:"log_level,omitempty"`
 }
 
 // GlobalMirrors 是各类下载源的镜像配置；空字符串表示使用官方源。
@@ -66,6 +71,7 @@ type GlobalDownload struct {
 func DefaultGlobal() Global {
 	return Global{
 		Download: GlobalDownload{LogMode: LogModeSummary},
+		LogLevel: logging.LevelInfo.Name(),
 	}
 }
 
@@ -210,6 +216,12 @@ func NormalizeGlobal(cfg Global) (Global, error) {
 		problems = append(problems, err.Error())
 		cfg.DefaultJava = ""
 	}
+	level, levelErr := logging.ParseLevel(cfg.LogLevel)
+	if levelErr != nil {
+		problems = append(problems, levelErr.Error())
+		level = logging.LevelInfo
+	}
+	cfg.LogLevel = level.Name()
 	if len(problems) > 0 {
 		return cfg, errors.New(strings.Join(problems, "；"))
 	}
@@ -263,7 +275,8 @@ func NormalizeMirror(raw string) (string, error) {
 // GlobalFromEnv 应用环境变量覆盖，返回新的全局配置。
 // 支持 MTL_MOJANG_MIRROR / MTL_ASSETS_MIRROR / MTL_LIBRARIES_MIRROR /
 // MTL_VERSION_META_MIRROR / MTL_MOD_MIRROR / MTL_FABRIC_MIRROR / MTL_FORGE_MIRROR /
-// MTL_DOWNLOAD_LOG / MTL_DOWNLOAD_RETRIES / MTL_DOWNLOAD_TIMEOUT / MTL_DOWNLOAD_CONCURRENCY。
+// MTL_DOWNLOAD_LOG / MTL_DOWNLOAD_RETRIES / MTL_DOWNLOAD_TIMEOUT / MTL_DOWNLOAD_CONCURRENCY /
+// MTL_LOG_LEVEL。
 func GlobalFromEnv(cfg Global) Global {
 	set := func(env string, dst *string) {
 		if v, ok := os.LookupEnv(env); ok {
@@ -279,6 +292,10 @@ func GlobalFromEnv(cfg Global) Global {
 	set("MTL_FORGE_MIRROR", &cfg.Mirrors.Forge)
 	set("MTL_DOWNLOAD_LOG", &cfg.Download.LogMode)
 	set("MTL_DOWNLOAD_TIMEOUT", &cfg.Download.Timeout)
+	// 空日志级别没有意义，留空时保留全局配置中的值。
+	if v := strings.TrimSpace(os.Getenv("MTL_LOG_LEVEL")); v != "" {
+		cfg.LogLevel = v
+	}
 	if v := strings.TrimSpace(os.Getenv("MTL_DOWNLOAD_RETRIES")); v != "" {
 		if n, err := parseInt(v); err == nil {
 			cfg.Download.Retries = n

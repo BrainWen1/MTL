@@ -45,6 +45,12 @@ type Options struct {
 	//   2) 追加 -Dsun.java2d.d3d=true JVM 参数（已存在则不重复追加）。
 	// 系统首选项设置失败只告警，不阻断启动。
 	PreferHighPerfGPU bool
+	// OnProcessStart 在 Java 子进程成功启动后回调，参数为 PID。
+	// 仅用于记录启动链路（日志、上次运行状态），为空时忽略。
+	OnProcessStart func(pid int)
+	// OnProcessExit 在 Java 子进程退出后回调实际退出码；被强制结束时传 -1。
+	// 回调保证最多执行一次，且先于 Run 返回。
+	OnProcessExit func(code int)
 }
 
 // d3dJVMArg 是启用高性能 GPU 调度时追加的 JVM 参数。
@@ -269,14 +275,19 @@ func Run(ctx context.Context, opts Options) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return runProcess(ctx, cmd, logf)
+	return runProcess(ctx, cmd, logf, opts.OnProcessStart, opts.OnProcessExit)
 }
 
-func runProcess(ctx context.Context, cmd *exec.Cmd, logf func(string, ...any)) error {
+func runProcess(ctx context.Context, cmd *exec.Cmd, logf func(string, ...any),
+	onStart func(int), onExit func(int)) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("启动 Java 进程失败: %w", err)
 	}
-	logf("游戏进程 PID: %d", cmd.Process.Pid)
+	pid := cmd.Process.Pid
+	logf("游戏进程 PID: %d", pid)
+	if onStart != nil {
+		onStart(pid)
+	}
 
 	done := make(chan error, 1)
 	go func() {
@@ -285,6 +296,7 @@ func runProcess(ctx context.Context, cmd *exec.Cmd, logf func(string, ...any)) e
 
 	select {
 	case err := <-done:
+		notifyExit(onExit, err)
 		return exitStatus(err, logf)
 	case <-ctx.Done():
 		logf("收到退出信号，正在通知游戏进程...")
@@ -292,16 +304,37 @@ func runProcess(ctx context.Context, cmd *exec.Cmd, logf func(string, ...any)) e
 			logf("无法向游戏进程转发中断信号: %v（%s 后仍未退出将强制结束）", err, shutdownGrace)
 		}
 		select {
-		case <-done:
+		case err := <-done:
+			notifyExit(onExit, err)
 			logf("游戏进程已退出")
 			return nil
 		case <-time.After(shutdownGrace):
 			logf("游戏进程未在 %s 内退出，强制结束", shutdownGrace)
 			_ = cmd.Process.Kill()
 			<-done
+			if onExit != nil {
+				onExit(-1)
+			}
 			return errors.New("游戏进程被强制结束")
 		}
 	}
+}
+
+// notifyExit 把子进程退出结果转换为退出码回调；等待失败时使用 -1。
+func notifyExit(onExit func(int), err error) {
+	if onExit == nil {
+		return
+	}
+	code := -1
+	if err == nil {
+		code = 0
+	} else {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			code = ee.ExitCode()
+		}
+	}
+	onExit(code)
 }
 
 func exitStatus(err error, logf func(string, ...any)) error {

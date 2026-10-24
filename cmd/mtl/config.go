@@ -10,13 +10,14 @@ import (
 
 	"mtl/internal/config"
 	"mtl/internal/launch"
+	"mtl/internal/logging"
 	"mtl/internal/memory"
 )
 
 // configCommand 处理 mtl config 子命令。配置存放于 <实例目录>/.mtl/config.json。
 func configCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("用法: mtl config <show|set-memory|set-java|set-highperf-gpu|set-default-account|add-jvm-arg|remove-jvm-arg|add-game-arg|remove-game-arg|reset> ...")
+		return fmt.Errorf("用法: mtl config <show|set-memory|set-java|set-highperf-gpu|set-default-account|add-jvm-arg|remove-jvm-arg|add-game-arg|remove-game-arg|reset|global|set-mirror|set-log-level> ...")
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
@@ -44,9 +45,33 @@ func configCommand(args []string) error {
 		return configGlobal(rest)
 	case "set-mirror":
 		return configSetMirror(rest)
+	case "set-log-level":
+		return configSetLogLevel(rest)
 	default:
-		return fmt.Errorf("未知 config 子命令 %q（可用: show、set-memory、set-java、set-highperf-gpu、set-default-account、add-jvm-arg、remove-jvm-arg、add-game-arg、remove-game-arg、reset、global、set-mirror）", sub)
+		return fmt.Errorf("未知 config 子命令 %q（可用: show、set-memory、set-java、set-highperf-gpu、set-default-account、add-jvm-arg、remove-jvm-arg、add-game-arg、remove-game-arg、reset、global、set-mirror、set-log-level）", sub)
 	}
+}
+
+// configSetLogLevel 修改全局终端日志级别；实例日志文件始终记录 debug 及以上。
+func configSetLogLevel(args []string) error {
+	if len(args) != 1 {
+		return errors.New("用法: mtl config set-log-level <debug|info|warn|error>")
+	}
+	level, err := logging.ParseLevel(args[0])
+	if err != nil {
+		return err
+	}
+	cfg, loadErr := config.LoadGlobal()
+	if loadErr != nil {
+		fmt.Fprintf(os.Stderr, "[Config] 警告: %v；将基于可用字段保存\n", loadErr)
+	}
+	cfg.LogLevel = level.Name()
+	if err := config.SaveGlobal(cfg); err != nil {
+		return err
+	}
+	path, _ := config.GlobalPath()
+	fmt.Printf("[Config] 已设置全局日志级别为 %s（%s）\n", level.Name(), path)
+	return nil
 }
 
 // configGlobal 打印全局配置路径与内容（镜像源、下载模式等）。
