@@ -66,6 +66,8 @@ func run(args []string) error {
 		return modCommand(args[1:])
 	case "java":
 		return javaCommand(args[1:])
+	case "tui":
+		return tuiCommand(args[1:])
 	case "version":
 		fmt.Println("mtl dev")
 		return nil
@@ -107,6 +109,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  mtl java list [--debug]")
 	fmt.Fprintln(os.Stderr, "  mtl java use <runtime-id>")
 	fmt.Fprintln(os.Stderr, "  mtl java prune")
+	fmt.Fprintln(os.Stderr, "  mtl tui [--dir <实例根目录>]（终端交互界面）")
 	fmt.Fprintln(os.Stderr, "  mtl version")
 }
 

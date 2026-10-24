@@ -1,5 +1,7 @@
 # MTL - Minecraft启动器 项目规约
-项目：mtl，Go语言开发，CLI启动器，对标PCL2基础能力，面向Minecraft Fabric/vanilla，支持mrpack整合包
+
+项目：mtl，Go语言开发，CLI启动器，对标PCL2基础能力，面向Minecraft Fabric/vanilla，支持mrpack整合包。
+
 约束：
 1. 安全：全部路径使用SafeJoin，禁止路径穿越；不执行外部未知脚本；不请求微软软登录接口，仅离线账号。
 2. Token节约：优先增量修改，不重写已有runtime/assets/mrpack/fabric/launch核心逻辑；只新增必要代码。
@@ -18,6 +20,8 @@
 - 实例配置持久化，单实例独立配置，参数优先级：cli参数 > 实例配置 > 全局配置 > 自动匹配
 - mtl mod：实例mod管理
 - mtl java：全局runtime list / use / prune 管理
+- 启动分级日志增强：run自动输出INFO/WARN/ERROR/DEBUG，带时间戳和模块标识，日志文件落盘到实例logs目录
+- mtl diagnose：崩溃诊断，识别OOM、Mod冲突、Java版本异常、资源缺失等常见问题
+- mtl backup / mtl restore：实例备份与还原，排除全局assets/runtime缓存，支持--list、--dry-run、--force
 
-当前开发目标：日志增强、mtl diagnose崩溃诊断子命令，识别OOM、mod冲突、java版本异常等崩溃，输出诊断建议
-
+当前开发目标：实现 mtl tui 终端交互式界面，使用 Charm bubbletea，作为现有CLI的交互外壳，不重写已有业务逻辑
