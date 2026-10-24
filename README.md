@@ -1,12 +1,14 @@
 # MTL (My Tiny Launcher)
 
-轻量级命令行 Minecraft 启动器，原生支持 mrpack 整合包，主打 **Fabric + 离线模式**。
+轻量级命令行 Minecraft 启动器，原生支持 mrpack 整合包，主打 **Fabric / Forge + 离线模式**。
 
 MTL 是自用项目，不是成熟的发行版启动器。功能按实际需要逐步迭代，优先离线、轻量、少联网。
 
 ## ✨ 已实现功能
 
-- **mrpack 整合包安装**：解析 `modrinth.index.json`，下载客户端文件、解压 overrides，并自动安装对应版本的 Fabric loader。
+- **mrpack 整合包安装**：解析 `modrinth.index.json`，下载客户端文件、解压 overrides，并自动安装对应版本的 Fabric 或 Forge loader（Forge 需 Minecraft 1.20.1+）。
+- **加载器抽象**：`internal/loader` 统一 Fabric / Forge 的安装与启动接口；安装时把 `loader_type`、`loader_version` 写入实例配置，旧实例按 profile id 自动识别。
+- **Forge 安装**：下载并校验官方 installer 到全局缓存，准备原版文件与 `launcher_profiles.json`，以非 GUI 方式执行 installer；已安装的 profile 和 installer 缓存会复用。
 - **哈希校验与自动跳过**：下载前校验已有文件的 sha1 / sha512，哈希一致的直接跳过；重复执行安装不会重复下载。
 - **实例隔离**：每个整合包一个独立实例目录，mod、配置、存档、库文件互不影响。
 - **Java 运行时自动准备**：按版本要求从 Mojang 官方运行时清单下载并校验，缓存复用；也可用 `--java` 指定本机 Java。
@@ -17,10 +19,12 @@ MTL 是自用项目，不是成熟的发行版启动器。功能按实际需要�
 - **离线账号**：全局保存离线账号（用户名 + 离线 UUID），实例可绑定默认账号，`--account` 可临时切换；同一台机器可用多个账号进行局域网联机。
 - **崩溃日志归档与诊断**：每次启动后自动归档新增崩溃日志，并用离线关键词规则给出 Mod 冲突提示。
 - **整合包查看**：`mtl inspect` 可在安装前查看整合包信息，按需解压 overrides。
+- **实例列表与健康检查**：`mtl list` 只读扫描实例根目录，用表格展示加载器、默认账号和 Java 状态；`mtl info` 展示完整配置与健康检查报告。
 
 ## ⚠️ 当前已知限制
 
-- 仅支持 **Fabric** loader 的 mrpack，不支持 Forge / NeoForge / Quilt 的自动安装。
+- Forge 仅支持 **Minecraft 1.20.1 及以上**；NeoForge、Quilt 尚不支持（Quilt 依赖会被识别，但安装时会明确报错）。
+- Forge 安装依赖 Forge 官方 Maven 与 installer，首次安装耗时较长，网络受限时可能失败。
 - 仅有离线账号体系，不接入微软正版登录；启动参数中的 access token 固定为 `0`，用户类型为 `legacy`。
 - 高性能显卡调度仅 Windows 生效，其他平台静默跳过。
 - 崩溃诊断是**静态关键词匹配**，只能覆盖常见模式；复杂崩溃、混淆堆栈或非 Mod 问题仍需人工查看原始日志。
@@ -62,7 +66,7 @@ CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -o mtl     ./cmd/mtl
 ./mtl install --dir ./instances/demo ./test-pack.mrpack
 ```
 
-安装会下载整合包声明的客户端文件、解压 overrides，并安装对应 Fabric loader。耗时取决于网络，已存在且哈希正确的文件会自动跳过。
+安装会下载整合包声明的客户端文件、解压 overrides，并安装对应的 Fabric / Forge loader。耗时取决于网络，已存在且哈希正确的文件会自动跳过。
 
 **2. 添加并绑定默认离线账号**
 
@@ -106,7 +110,7 @@ mtl install --dir <实例目录> [--concurrency N] [--skip-loader] <pack.mrpack>
 | --- | --- | --- |
 | `--dir <目录>` | 是 | 实例目录，不存在时自动创建 |
 | `--concurrency N` | 否 | 并发下载数，缺省为 4 |
-| `--skip-loader` | 否 | 只下载整合包文件，不安装 Fabric loader |
+| `--skip-loader` | 否 | 只下载整合包文件，不安装 Fabric / Forge loader |
 | `<pack.mrpack>` | 是 | mrpack 文件路径 |
 
 示例：
@@ -114,6 +118,12 @@ mtl install --dir <实例目录> [--concurrency N] [--skip-loader] <pack.mrpack>
 ```bash
 ./mtl install --dir ./instances/demo ./test-pack.mrpack
 ```
+
+说明：
+
+- Fabric 与 Forge 的选择完全由 mrpack 的 `dependencies` 决定。
+- Forge 仅支持 Minecraft 1.20.1+；Forge 版本可写完整形式 `1.20.1-47.4.3`，也可只写 `47.4.3`。
+- 重复安装会复用已校验的文件、已安装的 Forge profile 与 installer 缓存，不会重复执行 installer。
 
 ### mtl run
 
@@ -178,6 +188,65 @@ mtl inspect [--extract <目录>] <pack.mrpack>
 ./mtl inspect ./test-pack.mrpack
 ./mtl inspect --extract ./tmp/overrides ./test-pack.mrpack
 ```
+
+### mtl list
+
+只读扫描实例根目录（默认 `./instances`），输出每个实例的加载器、默认账号和 Java 路径状态。
+
+```bash
+mtl list [--dir <实例根目录>]
+```
+
+| 参数 | 说明 |
+| --- | --- |
+| `--dir <目录>` | 实例根目录，缺省为当前目录下的 `instances` |
+
+示例：
+
+```bash
+./mtl list
+./mtl list --dir ./instances
+```
+
+输出表格包含：实例名、加载器类型、加载器版本、默认账号、Java 状态。`loader_type` / `loader_version` 为空时显示 `-`；Java 路径异常会以 `!!` 标记。
+
+说明：
+
+- 只扫描根目录下的一级子目录，不递归。
+- 缺少 `.mtl/config.json` 或配置损坏的目录会输出警告并跳过，不影响其他实例。
+
+### mtl info
+
+查看单个实例的完整配置和健康检查结果。
+
+```bash
+mtl info <实例名> [--dir <实例根目录>]
+```
+
+| 参数 | 说明 |
+| --- | --- |
+| `<实例名>` | 必填，实例根目录下的目录名 |
+| `--dir <目录>` | 实例根目录，缺省为当前目录下的 `instances` |
+
+示例：
+
+```bash
+./mtl info demo
+./mtl info --dir ./instances demo
+./mtl info demo --dir ./instances
+```
+
+健康检查当前覆盖：
+
+- Java 路径为空 → 自动匹配，视为正常；路径不存在或不可执行 → 标记异常。
+- `loader_type` / `loader_version` 为空 → 警告并显示 `-`，不影响命令成功。
+- 未绑定默认账号 → 警告。
+- 加载器不是 `fabric` / `forge` → 警告。
+
+说明：
+
+- 只读操作，不修改任何配置文件，也不启动游戏。
+- Java 检查只校验文件是否存在、是否为可执行文件，不会执行 `java -version`。
 
 ### mtl account
 
@@ -290,8 +359,9 @@ instances/
     ├── crash-reports/           # Minecraft 原版生成的崩溃日志（连字符，崩溃后出现）
     ├── mods/                    # 整合包 mod
     ├── config/                  # 整合包自带配置
-    ├── libraries/               # 游戏库与 Fabric loader 库
-    ├── versions/                # 原版版本 json/jar 与 Fabric profile
+    ├── libraries/               # 游戏库与 Fabric / Forge loader 库
+    ├── versions/                # 原版版本 json/jar 与加载器 profile
+    ├── launcher_profiles.json   # Forge installer 前置文件（仅 Forge 实例需要）
     ├── logs/
     ├── saves/
     └── ...                      # resourcepacks、data、downloads 等由整合包决定
@@ -330,6 +400,8 @@ Linux / macOS：`~/.cache/mtl/` 下为相同结构。
   "game_args": [],
   "prefer_high_perf_gpu": false,
   "default_account": "",
+  "loader_type": "",
+  "loader_version": "",
   "java": ""
 }
 ```
@@ -342,6 +414,8 @@ Linux / macOS：`~/.cache/mtl/` 下为相同结构。
 | `game_args` | string[] | 追加的游戏参数，只排在主类之后 |
 | `prefer_high_perf_gpu` | bool | 是否启用高性能显卡调度，仅 Windows 生效，默认 `false` |
 | `default_account` | string | 实例默认离线账号名；空字符串表示未绑定 |
+| `loader_type` | string | 安装时使用的加载器：`fabric` / `forge`；由 `mtl install` 写入，旧实例为空时按 profile id 推断 |
+| `loader_version` | string | 加载器版本，如 Fabric loader 版本或 Forge `1.20.1-47.4.3`；由 `mtl install` 写入 |
 | `java` | string | 上次成功启动使用的 Java 可执行文件绝对路径；空表示自动匹配。路径失效时自动重新匹配 |
 
 补充说明：
@@ -372,7 +446,7 @@ Linux / macOS：`~/.cache/mtl/` 下为相同结构。
 
 适用场景与局限：
 
-- 适合快速定位 Fabric 整合包最常见的启动崩溃。
+- 适合快速定位 Fabric / Forge 整合包最常见的启动崩溃。
 - 关键词匹配可能误报（例如日志中的 Mod 列表恰好包含相关词），也可能漏报。
 - 深度混淆堆栈、显卡/驱动问题、内存不足、Java 版本问题不在诊断范围内。
 - 归档或诊断失败只告警，不会阻断启动流程。
@@ -395,18 +469,21 @@ Linux / macOS：`~/.cache/mtl/` 下为相同结构。
 
 - `internal/mrpack`：mrpack 解析、路径安全（`SafeJoin` / `ValidateRelPath`）、overrides 解压
 - `internal/downloader`：并发下载、哈希校验、失败重试
-- `internal/fabric`：Fabric loader 安装与版本文件准备
+- `internal/loader`：加载器统一抽象与按类型构造（Fabric / Forge，NeoForge 预留）
+- `internal/fabric`：Fabric loader 安装、原版版本文件准备
+- `internal/forge`：Forge installer 下载与调用、profile/libraries 准备（Minecraft 1.20.1+）
 - `internal/runtime`：Mojang 官方 Java 运行时下载、校验、缓存
 - `internal/assets`：原版资源索引与对象缓存
-- `internal/launch`：启动参数组装、进程拉起、Windows 显卡调度
+- `internal/launch`：版本 json 解析、启动参数组装（Fabric / Forge）、进程拉起、Windows 显卡调度
 - `internal/config`：实例配置读写与参数优先级合并
+- `internal/instance`：实例根目录只读扫描、Java 路径状态与健康检查
 - `internal/account`：离线账号、用户名校验、离线 UUID
 - `internal/memory`：内存值解析、校验与自动推荐
 - `internal/crash`：崩溃日志归档与离线诊断
 
 开发约定：
 
-- 优先增量修改，不重写已有的 mrpack / downloader / fabric / launch 核心逻辑。
+- 优先增量修改，不重写已有的 mrpack / downloader / fabric / forge / launch 核心逻辑。
 - 新增功能尽量放到独立包中，保持包职责单一。
 - 所有路径都经过 `SafeJoin`，禁止路径穿越。
 - 不执行外部未知脚本，不接入微软登录接口，优先离线实现。
@@ -420,10 +497,53 @@ go vet ./...
 go test ./...
 ```
 
-## 📌 后续规划
+## 📌 后续规划（轻量对标 PCL2）
 
-- 支持 Forge / NeoForge mrpack
-- mrpack 增量更新，并清理新版本中已移除的文件
-- 皮肤 / 披风（离线场景下的有限支持）
-- Mod 管理与冲突可视化
-- 更多 PCL2 启动器细节对齐（下载源、镜像、版本隔离策略等）
+排序原则：先补“装得上、跑得稳”的地基，再做日常管理，最后才是体验细节。保持 CLI、离线优先，不接入微软登录。
+
+### P0 — 下一阶段优先完成
+
+1. **mrpack 增量更新与残留清理**
+   - 安装后记录清单（`.mtl/pack-lock.json`：包版本、托管文件路径与哈希）。
+   - 再次 `install` 时按新旧 index 对比：只下载变更文件，删除新包中已移除的托管文件。
+   - 保护用户数据：`saves/`、手动新增的 mod、用户改过的配置不参与清理。
+   - 验收：同一实例连续安装 v1 → v2 后 `mods/` 无 v1 残留，存档与手动文件保留。
+
+2. **不依赖整合包的原版 / 加载器安装**
+   - 新增 `mtl install --dir <目录> --mc <版本> [--loader fabric|forge] [--loader-version <版本>]`。
+   - 复用现有 `fabric` / `forge` / `runtime` 包；`--loader` 省略时只装原版。
+   - 验收：空目录安装 1.20.1 原版、Fabric、Forge 后均可直接 `mtl run`。
+
+3. **下载断点续传与镜像源**
+   - 单文件 `Range` 续传（`.part` 临时文件），重试不再从头下载。
+   - 全局配置 Mojang / Fabric / Forge Maven / Modrinth 下载源，支持环境变量或全局配置文件覆盖；镜像失败自动回退官方。
+   - 验收：下载中断后重新执行可从断点继续；镜像不可用时仍能完成安装。
+
+### P1 — 日常管理能力
+
+4. **本地 Mod 管理**
+   - `mtl mod list|enable|disable|rm`：离线读取 `fabric.mod.json` / `META-INF/mods.toml`，展示名称、版本、加载器。
+   - 离线检测重复 Mod、加载器不匹配、缺失前置；禁用通过移动文件实现，可随时恢复。
+5. **Java 运行时管理**
+   - `mtl java list|use|prune`：查看缓存运行时、手动登记本机 Java、清理未使用版本。
+   - 与现有实例 `java` 字段、`--java` 优先级保持一致。
+6. **崩溃诊断与启动日志增强**
+   - 每次启动落盘独立日志，保留最近 N 次；崩溃摘要附带 Mod 列表快照。
+   - 补充 Java 版本不匹配、内存不足（OOM）、显卡驱动等离线规则。
+7. **实例备份与恢复**
+   - `mtl backup --dir <目录> [--include mods|config|saves|all]`，输出可恢复的压缩包。
+   - 支持启动前自动备份存档，避免整合包更新或崩溃损坏世界。
+
+### P2 — 体验对齐（按需）
+
+8. **服务器与局域网联机辅助**：`mtl server add|list|rm`，启动时 `--server` 快速加入；补充局域网端口与 `online-mode=false` 检查提示。
+9. **资源包 / 光影包管理**：列出、启用、禁用、删除，复用 Mod 管理的文件移动策略。
+10. **authlib-injector 第三方登录（可选）**：仅支持用户自建 Yggdrasil，仍然不接入微软账号；默认关闭。
+11. **发布与自更新**：版本号注入、GoReleaser 式多平台构建、可校验的二进制自更新。
+12. **轻量 TUI**：在现有命令上提供实例选择、安装进度、崩溃摘要的单屏界面，不引入 GUI 依赖。
+
+### 明确暂不做
+
+- 微软正版登录、在线皮肤 / 披风服务。
+- 图形界面与在线 Mod 市场（联网接口、审核与版权维护成本过高）。
+- 重写现有 `mrpack` / `runtime` / `assets` / `fabric` / `forge` / `launch` 核心逻辑；新能力优先独立成包。

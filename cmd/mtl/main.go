@@ -43,6 +43,10 @@ func run(args []string) error {
 		return runInstance(args[1:])
 	case "inspect":
 		return inspect(args[1:])
+	case "list":
+		return listCommand(args[1:])
+	case "info":
+		return infoCommand(args[1:])
 	case "account":
 		return accountCommand(args[1:])
 	case "config":
@@ -61,6 +65,8 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  mtl install --dir <实例目录> [--concurrency N] [--skip-loader] <pack.mrpack>（支持 Fabric / Forge 1.20.1+）")
 	fmt.Fprintln(os.Stderr, "  mtl run --dir <实例目录> [--account <账号>] [--username <名字>] [--memory <内存>] [--memory-auto] [--highperf-gpu|--no-highperf-gpu] [--java <java路径>] [--jvm-arg <参数>]... [--game-arg <参数>]... [--debug]")
 	fmt.Fprintln(os.Stderr, "  mtl inspect [--extract <dir>] <pack.mrpack>")
+	fmt.Fprintln(os.Stderr, "  mtl list [--dir <实例根目录>]（默认 ./instances）")
+	fmt.Fprintln(os.Stderr, "  mtl info [--dir <实例根目录>] <实例名>")
 	fmt.Fprintln(os.Stderr, "  mtl account list")
 	fmt.Fprintln(os.Stderr, "  mtl account add <name>")
 	fmt.Fprintln(os.Stderr, "  mtl account rm <name>")
