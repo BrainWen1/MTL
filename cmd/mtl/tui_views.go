@@ -36,6 +36,30 @@ var tuiInstanceActions = []string{
 	"删除实例",
 }
 
+var tuiNewInstanceItems = []string{
+	"从本地 mrpack 整合包导入",
+	"新建原版 MC 实例",
+}
+
+var tuiNewInstanceDescriptions = []string{
+	"选择 .mrpack 文件，自动解析版本、mod 与资源",
+	"选择 Minecraft 版本与加载器，创建纯净实例",
+}
+
+var tuiLoaderChoices = []string{"", "fabric", "forge"}
+
+var tuiLoaderNames = []string{
+	"无（纯原版）",
+	"Fabric",
+	"Forge",
+}
+
+var tuiLoaderDescriptions = []string{
+	"只安装 Minecraft 原版核心与资源",
+	"自动选择最新稳定 Fabric Loader",
+	"自动选择 Forge 推荐版本（需要 1.20.1+）",
+}
+
 func (m tuiModel) View() string {
 	var b strings.Builder
 	b.WriteString("MTL · My Tiny Launcher")
@@ -70,6 +94,14 @@ func (m tuiModel) View() string {
 			b.WriteString(m.viewJava())
 		case tuiPageDiagnose:
 			b.WriteString(m.viewDiagnose())
+		case tuiPageNewInstance:
+			b.WriteString(m.viewNewInstance())
+		case tuiPageNewMinecraft:
+			b.WriteString(m.viewNewMinecraft())
+		case tuiPageNewLoader:
+			b.WriteString(m.viewNewLoader())
+		case tuiPageNewProgress:
+			b.WriteString(m.viewNewProgress())
 		}
 	}
 
@@ -106,6 +138,14 @@ func tuiPageTitle(page tuiPage) string {
 		return "Java 运行时"
 	case tuiPageDiagnose:
 		return "崩溃诊断"
+	case tuiPageNewInstance:
+		return "新建实例"
+	case tuiPageNewMinecraft:
+		return "新建实例 / 选择版本"
+	case tuiPageNewLoader:
+		return "新建实例 / 选择加载器"
+	case tuiPageNewProgress:
+		return "新建实例 / 安装进度"
 	default:
 		return ""
 	}
@@ -145,21 +185,42 @@ func (m tuiModel) viewInstances() string {
 	default:
 		b.WriteString("选择实例后打开操作菜单\n\n")
 	}
+
+	offset := 0
+	if m.instMode == tuiInstanceManage {
+		offset = 1
+		marker := "  "
+		if m.instCursor == 0 {
+			marker = "> "
+		}
+		b.WriteString(marker + "＋ 新建实例\n")
+		b.WriteString("    mrpack 导入 / 原版、Fabric、Forge\n\n")
+	}
+
 	if m.instErr != nil {
 		b.WriteString("扫描实例失败: " + m.instErr.Error() + "\n")
 		return b.String()
 	}
 	if len(m.instances) == 0 {
-		b.WriteString("未发现可识别的实例。请先使用 mtl install 创建实例，或用 --dir 指定实例根目录。\n")
+		b.WriteString("未发现可识别的实例。\n")
+		if m.instMode == tuiInstanceManage {
+			b.WriteString("可选择上方“新建实例”，或先用 mtl install 创建实例。\n")
+		}
 		return b.String()
 	}
 
+	cursor := m.instCursor - offset
+	capacity := m.listCapacity()
+	if offset > 0 {
+		// 管理模式多出“新建实例”标题、描述和空行共 3 行。
+		capacity = maxInt(3, capacity-3)
+	}
 	rows := [][]string{{"  实例名", "加载器", "版本", "默认账号", "Java"}}
-	start, end := windowBounds(m.instCursor, len(m.instances), m.listCapacity())
+	start, end := windowBounds(cursor, len(m.instances), capacity)
 	for i := start; i < end; i++ {
 		e := m.instances[i]
 		marker := "  "
-		if i == m.instCursor {
+		if i == cursor {
 			marker = "> "
 		}
 		rows = append(rows, []string{
@@ -603,7 +664,7 @@ func (m tuiModel) viewFooter() string {
 		return "↑/↓ 选择  Enter 确认  q 退出"
 	case tuiPageInstances:
 		if m.instMode == tuiInstanceManage {
-			return "↑/↓ 选择  Enter 打开操作菜单  r 刷新  q 返回"
+			return "↑/↓ 选择  Enter 确认  n 新建实例  r 刷新  q 返回"
 		}
 		return "↑/↓ 选择  Enter 确认  r 刷新  q 返回"
 	case tuiPageInstanceMenu:
@@ -622,6 +683,17 @@ func (m tuiModel) viewFooter() string {
 		return "↑/↓ 选择  Enter 设为默认  p 清理  r 刷新  q 返回"
 	case tuiPageDiagnose:
 		return "↑/↓ 滚动  PgUp/PgDn 翻页  r 重新诊断  q 返回"
+	case tuiPageNewInstance:
+		return "↑/↓ 选择  Enter 确认  q 返回"
+	case tuiPageNewMinecraft:
+		return "↑/↓ 选择  PgUp/PgDn 翻页  Enter 确认  r 刷新  q 返回"
+	case tuiPageNewLoader:
+		return "↑/↓ 选择  Enter 确认  q 返回"
+	case tuiPageNewProgress:
+		if m.newInst.install.running {
+			return "安装中，↑/↓ 查看日志  PgUp/PgDn 翻页  两次 Ctrl+C 强制退出"
+		}
+		return "↑/↓ 查看日志  Enter 返回  q 返回"
 	}
 	return "q 返回"
 }

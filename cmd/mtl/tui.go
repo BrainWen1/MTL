@@ -25,7 +25,10 @@ func tuiCommand(args []string) error {
 		return errors.New("--dir 不能为空")
 	}
 
-	program := tea.NewProgram(newTUIModel(rootValue), tea.WithAltScreen())
+	model := newTUIModel(rootValue)
+	program := tea.NewProgram(model, tea.WithAltScreen())
+	// 安装进度由后台 goroutine 通过 bridge 送回 Bubble Tea 事件循环。
+	model.bridge.send = program.Send
 	if _, err := program.Run(); err != nil {
 		return fmt.Errorf("TUI 启动失败（请在支持交互的终端中运行，或改用普通子命令）: %w", err)
 	}

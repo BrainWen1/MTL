@@ -30,6 +30,10 @@ const (
 	tuiPageBackupDetail
 	tuiPageJava
 	tuiPageDiagnose
+	tuiPageNewInstance
+	tuiPageNewMinecraft
+	tuiPageNewLoader
+	tuiPageNewProgress
 )
 
 // tuiInstanceMode 决定实例列表被哪个入口复用。
@@ -57,6 +61,8 @@ const (
 	tuiModalResetConfig
 	tuiModalPruneJava
 	tuiModalRemoveMod
+	tuiModalNewPackName
+	tuiModalNewMinecraftName
 )
 
 // tuiModal 是单行输入或输入式确认弹窗。
@@ -143,6 +149,11 @@ type tuiModel struct {
 	diagLoading bool
 	diagOffset  int
 
+	// 新建实例向导
+	newInst   tuiNewInstanceState
+	bridge    *tuiBridge
+	forceQuit bool
+
 	modal  tuiModal
 	notice string
 	isErr  bool
@@ -159,6 +170,7 @@ func newTUIModel(root string) tuiModel {
 		mods:         nil,
 		instances:    nil,
 		configHealth: nil,
+		bridge:       &tuiBridge{},
 	}
 }
 
@@ -173,6 +185,12 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" {
+			// 安装过程中需要二次确认，避免误触中断并留下未完成的目录。
+			if m.newInst.install.running && !m.forceQuit {
+				m.forceQuit = true
+				m.setNotice("安装进行中：再次按 Ctrl+C 强制退出（会留下未完成的实例目录）", true)
+				return m, nil
+			}
 			m.quit = true
 			return m, tea.Quit
 		}
@@ -187,7 +205,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.instances, m.skipped, m.instErr = nil, nil, nil
 			m.setNotice("实例根目录不存在: "+m.root+"（可先用 mtl install 创建实例，或用 --dir 指定）", false)
 		}
-		m.instCursor = clampCursor(m.instCursor, len(m.instances))
+		m.instCursor = clampCursor(m.instCursor, m.instanceSelectableCount())
 		return m, nil
 	case tuiModsMsg:
 		m.mods, m.modWarnings, m.modErr = msg.mods, msg.warnings, msg.err
@@ -256,6 +274,31 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tuiNoticeMsg:
 		m.setNotice(msg.text, msg.err != nil)
 		return m, nil
+	case tuiMrpackPickedMsg:
+		return m.handleMrpackPicked(msg)
+	case tuiMCVersionsMsg:
+		m.newInst.mcVersionLoading = false
+		m.newInst.mcVersions = msg.versions
+		m.newInst.mcVersionErr = msg.err
+		if msg.err == nil {
+			m.newInst.mcVersionCursor = clampCursor(m.newInst.mcVersionCursor, len(msg.versions))
+		}
+		return m, nil
+	case tuiInstallLogMsg:
+		m.appendInstallLog(msg.line)
+		return m, nil
+	case tuiInstallDoneMsg:
+		m.newInst.install.running = false
+		m.newInst.install.done = true
+		m.forceQuit = false
+		if msg.err != nil {
+			m.newInst.install.err = msg.err.Error()
+			m.appendInstallLog("[错误] " + msg.err.Error())
+			return m, nil
+		}
+		m.newInst.install.err = ""
+		m.appendInstallLog("[完成] 实例目录已就绪: " + msg.dir)
+		return m, loadInstancesCmd(m.root)
 	}
 	return m, nil
 }
@@ -287,6 +330,14 @@ func (m tuiModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.updateJava(key)
 	case tuiPageDiagnose:
 		return m.updateDiagnose(key)
+	case tuiPageNewInstance:
+		return m.updateNewInstance(key)
+	case tuiPageNewMinecraft:
+		return m.updateNewMinecraft(key)
+	case tuiPageNewLoader:
+		return m.updateNewLoader(key)
+	case tuiPageNewProgress:
+		return m.updateNewProgress(key)
 	}
 	return m, nil
 }
@@ -324,21 +375,37 @@ func (m tuiModel) updateHome(key string) (tea.Model, tea.Cmd) {
 }
 
 func (m tuiModel) updateInstances(key string) (tea.Model, tea.Cmd) {
+	total := m.instanceSelectableCount()
 	switch key {
 	case "up", "k":
-		m.instCursor = clampCursor(m.instCursor-1, len(m.instances))
+		m.instCursor = clampCursor(m.instCursor-1, total)
 	case "down", "j":
-		m.instCursor = clampCursor(m.instCursor+1, len(m.instances))
+		m.instCursor = clampCursor(m.instCursor+1, total)
+	case "n":
+		if m.instMode == tuiInstanceManage {
+			return m.openNewInstanceMenu()
+		}
 	case "r":
 		m.setNotice("正在刷新实例列表…", false)
 		return m, loadInstancesCmd(m.root)
 	case "q", "esc":
 		m.page = tuiPageHome
 	case "enter":
+		if total == 0 {
+			return m, nil
+		}
+		if m.instMode == tuiInstanceManage && m.instCursor == 0 {
+			return m.openNewInstanceMenu()
+		}
+		index := m.instCursor
+		if m.instMode == tuiInstanceManage {
+			index--
+		}
+		index = clampCursor(index, len(m.instances))
 		if len(m.instances) == 0 {
 			return m, nil
 		}
-		m.selected = m.instances[m.instCursor]
+		m.selected = m.instances[index]
 		m.notice, m.isErr = "", false
 		switch m.instMode {
 		case tuiInstanceManage:
@@ -355,6 +422,22 @@ func (m tuiModel) updateInstances(key string) (tea.Model, tea.Cmd) {
 			return m, loadDiagnoseCmd(m.selected.Dir, m.selected.Name)
 		}
 	}
+	return m, nil
+}
+
+// instanceSelectableCount 在实例管理模式下把首行“新建实例”也计入光标范围。
+func (m tuiModel) instanceSelectableCount() int {
+	if m.instMode == tuiInstanceManage {
+		return len(m.instances) + 1
+	}
+	return len(m.instances)
+}
+
+// openNewInstanceMenu 打开新建实例向导，不触碰任何已有实例。
+func (m tuiModel) openNewInstanceMenu() (tea.Model, tea.Cmd) {
+	m.page = tuiPageNewInstance
+	m.newInst.menuCursor = 0
+	m.notice, m.isErr = "", false
 	return m, nil
 }
 
@@ -555,6 +638,9 @@ func (m tuiModel) updateDiagnose(key string) (tea.Model, tea.Cmd) {
 func (m tuiModel) updateModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
+		if m.modal.action == tuiModalNewPackName {
+			m.newInst.pendingPack = ""
+		}
 		m.modal = tuiModal{}
 		return m, nil
 	case "enter":
@@ -672,11 +758,69 @@ func (m tuiModel) submitModal() (tea.Model, tea.Cmd) {
 		target := m.mods[m.modCursor]
 		m.modBusy = true
 		return m, removeModCmd(m.selected.Dir, target.File)
+	case tuiModalNewPackName:
+		if m.newInst.pendingPack == "" {
+			m.setNotice("整合包路径已丢失，请重新选择", true)
+			return m, nil
+		}
+		dir, err := validateNewInstanceName(m.root, value)
+		if err != nil {
+			modal.err = err.Error()
+			m.modal = modal
+			return m, nil
+		}
+		pack := m.newInst.pendingPack
+		m.newInst.pendingPack = ""
+		m.page = tuiPageNewProgress
+		m.newInst.install = tuiInstallRun{
+			running: true,
+			title:   "正在导入 mrpack 整合包",
+			name:    value,
+			dir:     dir,
+			kind:    "mrpack",
+		}
+		m.forceQuit = false
+		m.notice, m.isErr = "", false
+		m.appendInstallLog("[New] 开始导入 mrpack: " + pack)
+		m.appendInstallLog("[New] 实例名: " + value)
+		m.appendInstallLog("[New] 目标目录: " + dir)
+		return m, installPackForTUI(m.root, value, pack, m.bridge)
+	case tuiModalNewMinecraftName:
+		mcVersion := m.newInst.selectedMC
+		loaderType := m.newInst.selectedLoader
+		if mcVersion == "" {
+			m.setNotice("Minecraft 版本已丢失，请重新选择", true)
+			return m, nil
+		}
+		dir, err := validateNewInstanceName(m.root, value)
+		if err != nil {
+			modal.err = err.Error()
+			m.modal = modal
+			return m, nil
+		}
+		m.page = tuiPageNewProgress
+		m.newInst.install = tuiInstallRun{
+			running: true,
+			title:   fmt.Sprintf("正在创建 Minecraft %s 实例", mcVersion),
+			name:    value,
+			dir:     dir,
+			kind:    "vanilla",
+		}
+		m.forceQuit = false
+		m.notice, m.isErr = "", false
+		m.appendInstallLog(fmt.Sprintf("[New] 开始创建实例: %s", tuiLoaderLabel(loaderType)))
+		m.appendInstallLog("[New] Minecraft 版本: " + mcVersion)
+		m.appendInstallLog("[New] 实例名: " + value)
+		m.appendInstallLog("[New] 目标目录: " + dir)
+		return m, installVanillaForTUI(m.root, value, mcVersion, loaderType, m.bridge)
 	}
 	return m, nil
 }
 
 func (m *tuiModel) setNotice(text string, isErr bool) {
+	// 错误可能来自 installer 输出，去掉换行，避免破坏单行通知布局。
+	text = strings.ReplaceAll(text, "\r", "")
+	text = strings.ReplaceAll(text, "\n", " / ")
 	m.notice, m.isErr = text, isErr
 }
 

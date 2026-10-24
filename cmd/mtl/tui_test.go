@@ -12,6 +12,7 @@ import (
 	"mtl/internal/backup"
 	"mtl/internal/config"
 	"mtl/internal/diagnose"
+	"mtl/internal/fabric"
 	"mtl/internal/instance"
 	"mtl/internal/mod"
 	"mtl/internal/runtime"
@@ -93,8 +94,9 @@ func TestTUIInstanceCursorClampAndModes(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		m, _ = updateTUIModel(t, m, tuiKey(tea.KeyDown))
 	}
-	if m.instCursor != 1 {
-		t.Fatalf("实例光标应被限制在 1，实际 %d", m.instCursor)
+	// 管理模式首行是“新建实例”，两个实例之后光标应停在 2。
+	if m.instCursor != 2 {
+		t.Fatalf("实例光标应被限制在 2，实际 %d", m.instCursor)
 	}
 
 	m.instMode = tuiInstanceMods
@@ -371,6 +373,16 @@ func TestTUIViewPagesRenderWithoutPanic(t *testing.T) {
 		cfg:    entry.Config,
 		report: diagnose.Report{Reason: "正常退出", Confidence: 80},
 	}
+	m.newInst.menuCursor = 1
+	m.newInst.mcVersions = []fabric.MinecraftVersion{{ID: "1.21.8", Type: "release"}}
+	m.newInst.selectedMC = "1.21.8"
+	m.newInst.install = tuiInstallRun{
+		title: "正在创建原版实例",
+		name:  "demo",
+		dir:   entry.Dir,
+		logs:  []string{"[Template] 下载资源 1/1"},
+		done:  true,
+	}
 
 	for _, page := range []tuiPage{
 		tuiPageHome,
@@ -383,6 +395,10 @@ func TestTUIViewPagesRenderWithoutPanic(t *testing.T) {
 		tuiPageBackupDetail,
 		tuiPageJava,
 		tuiPageDiagnose,
+		tuiPageNewInstance,
+		tuiPageNewMinecraft,
+		tuiPageNewLoader,
+		tuiPageNewProgress,
 	} {
 		m.page = page
 		if out := m.View(); strings.TrimSpace(out) == "" {

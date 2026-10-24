@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -44,11 +45,24 @@ func addDownloadFlags(fs *flag.FlagSet) *downloadFlags {
 // resolveDownloadSettings 合并命令行、环境变量与全局配置。
 // 全局配置损坏时只告警，仍按可用字段继续，避免镜像配置错误导致无法安装。
 func resolveDownloadSettings(fs *flag.FlagSet, f *downloadFlags, concurrency int, debug bool) (downloadSettings, error) {
+	return resolveDownloadSettingsTo(fs, f, concurrency, debug, os.Stderr)
+}
+
+// resolveDownloadSettingsQuiet 与 resolveDownloadSettings 行为一致，
+// 但把告警交给调用方处理；TUI 全屏渲染时使用 io.Discard，避免破坏界面。
+func resolveDownloadSettingsQuiet(fs *flag.FlagSet, f *downloadFlags, concurrency int, debug bool) (downloadSettings, error) {
+	return resolveDownloadSettingsTo(fs, f, concurrency, debug, io.Discard)
+}
+
+func resolveDownloadSettingsTo(fs *flag.FlagSet, f *downloadFlags, concurrency int, debug bool, warn io.Writer) (downloadSettings, error) {
+	if warn == nil {
+		warn = io.Discard
+	}
 	s := downloadSettings{Concurrency: concurrency}
 
 	cfg, err := config.LoadGlobal()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[Download] 警告: %v；已忽略非法字段并继续\n", err)
+		fmt.Fprintf(warn, "[Download] 警告: %v；已忽略非法字段并继续\n", err)
 	}
 	cfg = config.GlobalFromEnv(cfg)
 
@@ -64,7 +78,7 @@ func resolveDownloadSettings(fs *flag.FlagSet, f *downloadFlags, concurrency int
 	if s.Concurrency <= 0 {
 		s.Concurrency = cfg.Download.Concurrency
 	}
-	s.Mirrors = normalizeConfigMirrors(cfg.Mirrors)
+	s.Mirrors = normalizeConfigMirrorsTo(cfg.Mirrors, warn)
 
 	explicit := map[string]bool{}
 	fs.Visit(func(fl *flag.Flag) { explicit[fl.Name] = true })
@@ -121,10 +135,17 @@ func parseLogMode(raw string) (downloader.LogMode, error) {
 // normalizeConfigMirrors 规范化配置/环境变量中的镜像地址。
 // 单个字段非法不会影响其他字段，也不会中断安装。
 func normalizeConfigMirrors(m config.GlobalMirrors) downloader.Mirrors {
+	return normalizeConfigMirrorsTo(m, os.Stderr)
+}
+
+func normalizeConfigMirrorsTo(m config.GlobalMirrors, warn io.Writer) downloader.Mirrors {
+	if warn == nil {
+		warn = io.Discard
+	}
 	norm := func(name, raw string) string {
 		v, err := downloader.NormalizeMirror(raw)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[Download] 警告: 忽略无效镜像 %s: %v\n", name, err)
+			fmt.Fprintf(warn, "[Download] 警告: 忽略无效镜像 %s: %v\n", name, err)
 			return ""
 		}
 		return v

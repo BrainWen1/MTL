@@ -26,6 +26,8 @@ type Options struct {
 	MavenBaseURL string
 	// MojangManifestURL 用于准备原版文件，空值使用 Mojang 官方清单。
 	MojangManifestURL string
+	// PromotionsURL 是 Forge 推荐版本清单地址，空值使用官方地址（测试可注入）。
+	PromotionsURL string
 	// CacheDir 是 installer 全局缓存目录，空值使用 DefaultCacheDir。
 	CacheDir string
 	// JavaPath 为空时使用 Mojang 官方 Java 运行时；测试可注入。
