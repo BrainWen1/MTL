@@ -40,9 +40,75 @@ func configCommand(args []string) error {
 		return configRemoveArg(rest, false)
 	case "reset":
 		return configReset(rest)
+	case "global":
+		return configGlobal(rest)
+	case "set-mirror":
+		return configSetMirror(rest)
 	default:
-		return fmt.Errorf("未知 config 子命令 %q（可用: show、set-memory、set-java、set-highperf-gpu、set-default-account、add-jvm-arg、remove-jvm-arg、add-game-arg、remove-game-arg、reset）", sub)
+		return fmt.Errorf("未知 config 子命令 %q（可用: show、set-memory、set-java、set-highperf-gpu、set-default-account、add-jvm-arg、remove-jvm-arg、add-game-arg、remove-game-arg、reset、global、set-mirror）", sub)
 	}
+}
+
+// configGlobal 打印全局配置路径与内容（镜像源、下载模式等）。
+func configGlobal(args []string) error {
+	if len(args) != 0 {
+		return errors.New("用法: mtl config global")
+	}
+	path, err := config.GlobalPath()
+	if err != nil {
+		return err
+	}
+	cfg, err := config.LoadGlobal()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[Config] 警告: %v\n", err)
+	}
+	fmt.Printf("[Config] 全局配置文件: %s\n", path)
+	fmt.Print(config.FormatGlobal(cfg))
+	return nil
+}
+
+// configSetMirror 修改全局镜像源；url 传空字符串表示恢复官方源。
+func configSetMirror(args []string) error {
+	if len(args) != 2 {
+		return errors.New("用法: mtl config set-mirror <mojang|assets|libraries|version-meta|mod|fabric|forge> <镜像地址|空字符串>")
+	}
+	kind := strings.ToLower(strings.TrimSpace(args[0]))
+	raw := strings.TrimSpace(args[1])
+	if raw == `""` {
+		raw = ""
+	}
+	value, err := config.NormalizeMirror(raw)
+	if err != nil {
+		return err
+	}
+	cfg, loadErr := config.LoadGlobal()
+	if loadErr != nil {
+		fmt.Fprintf(os.Stderr, "[Config] 警告: %v；将基于可用字段保存\n", loadErr)
+	}
+	switch kind {
+	case "mojang":
+		cfg.Mirrors.Mojang = value
+	case "assets":
+		cfg.Mirrors.Assets = value
+	case "libraries":
+		cfg.Mirrors.Libraries = value
+	case "version-meta":
+		cfg.Mirrors.VersionMeta = value
+	case "mod":
+		cfg.Mirrors.Mod = value
+	case "fabric":
+		cfg.Mirrors.Fabric = value
+	case "forge":
+		cfg.Mirrors.Forge = value
+	default:
+		return fmt.Errorf("未知镜像类型 %q（可用: mojang、assets、libraries、version-meta、mod、fabric、forge）", kind)
+	}
+	if err := config.SaveGlobal(cfg); err != nil {
+		return err
+	}
+	path, _ := config.GlobalPath()
+	fmt.Printf("[Config] 已保存镜像 %s = %q（%s）\n", kind, value, path)
+	return nil
 }
 
 // parseConfigArgs 解析 --dir/--value，其余参数原样作为位置参数。

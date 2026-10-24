@@ -176,13 +176,16 @@ func (e Entry) Health() []Check {
 	switch strings.ToLower(strings.TrimSpace(e.Config.LoaderType)) {
 	case "":
 		checks = append(checks, Check{LevelWarning, "加载器", "未记录 loader_type，启动时按 profile id 推断"})
-	case "fabric", "forge":
+	case "vanilla", "fabric", "forge":
 		checks = append(checks, Check{LevelOK, "加载器", e.Config.LoaderType + " " + e.Config.LoaderVersion})
 	default:
-		checks = append(checks, Check{LevelWarning, "加载器", fmt.Sprintf("MTL 当前仅支持 fabric / forge，配置为 %q", e.Config.LoaderType)})
+		checks = append(checks, Check{LevelWarning, "加载器", fmt.Sprintf("MTL 当前支持 vanilla / fabric / forge，配置为 %q", e.Config.LoaderType)})
 	}
 	if strings.TrimSpace(e.Config.LoaderVersion) == "" {
 		checks = append(checks, Check{LevelWarning, "加载器版本", "未记录 loader_version，展示为 \"-\""})
+	}
+	if e.Config.InstallMode == config.InstallModeTemplate {
+		checks = append(checks, Check{LevelOK, "实例类型", "手动纯净模板（不参与 mrpack 增量清理）"})
 	}
 
 	if strings.TrimSpace(e.Config.DefaultAccount) == "" {

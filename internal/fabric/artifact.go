@@ -8,15 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"hash"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
+	"mtl/internal/downloader"
 	"mtl/internal/mrpack"
 )
 
@@ -39,7 +38,8 @@ const (
 	hashSHA512
 )
 
-var errHashMismatch = errors.New("sha 校验失败")
+// 与 downloader 共用哈希错误哨兵，便于上层统一 errors.Is 判断。
+var errHashMismatch = downloader.ErrHashMismatch
 
 type artifact struct {
 	relPath string // 实例目录内相对路径
@@ -73,6 +73,9 @@ type options struct {
 	concurrency int
 	retries     int
 	retryDelay  time.Duration
+	timeout     time.Duration
+	mirrors     downloader.Mirrors
+	logMode     downloader.LogMode
 	targetOS    string
 	targetArch  string
 	progress    *reporter
@@ -114,269 +117,105 @@ func validateDownloadURL(raw string) error {
 	return nil
 }
 
-// downloadArtifacts 与 downloader.Download 语义一致：并发下载、失败取消其余任务、
+// downloadArtifacts 复用公共 downloader：并发下载、断点续传、镜像回退、
 // 临时文件校验通过后原子改名；已存在且哈希正确的文件跳过。
 func downloadArtifacts(ctx context.Context, root string, arts []artifact, o options) (downloaded, skipped int, err error) {
 	if len(arts) == 0 {
 		return 0, 0, nil
 	}
-	// 先集中校验路径，避免下载到一半才发现逃逸路径。
+	files := make([]mrpack.File, 0, len(arts))
+	display := make(map[string]string, len(arts))
+	label := make(map[string]string, len(arts))
 	for _, a := range arts {
-		if _, err := mrpack.SafeJoin(root, a.relPath); err != nil {
-			return 0, 0, fmt.Errorf("文件 %q 路径非法: %w", a.relPath, err)
+		f := mrpack.File{
+			Path:      a.relPath,
+			Downloads: []string{a.url},
+			FileSize:  a.size,
 		}
+		if a.kind == hashSHA512 {
+			f.Hashes.SHA512 = a.sum
+		} else {
+			f.Hashes.SHA1 = a.sum
+		}
+		files = append(files, f)
+		display[a.relPath] = a.display
+		label[a.relPath] = a.label
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	total := len(arts)
-	jobs := make(chan int)
-	var (
-		wg       sync.WaitGroup
-		mu       sync.Mutex
-		firstErr error
-		done     int
-	)
-	workers := min(o.concurrency, total)
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for idx := range jobs {
-				a := arts[idx]
-				wasSkipped, err := downloadOneArtifact(ctx, root, a, o)
-				if err != nil {
-					mu.Lock()
-					if firstErr == nil {
-						firstErr = err
-						cancel()
-					}
-					mu.Unlock()
-					continue
-				}
-				mu.Lock()
-				done++
-				if wasSkipped {
-					skipped++
-				} else {
-					downloaded++
-				}
-				msg := fmt.Sprintf("下载%s %s (%d/%d)", a.label, a.display, done, total)
-				if wasSkipped {
-					msg = fmt.Sprintf("跳过%s %s（已存在） (%d/%d)", a.label, a.display, done, total)
-				}
-				mu.Unlock()
-				o.progress.report(msg)
+	verbose := o.logMode == downloader.LogVerbose
+	lastPct := -10
+	results, err := downloader.Download(ctx, root, files, downloader.Options{
+		Concurrency: o.concurrency,
+		Retries:     o.retries,
+		RetryDelay:  o.retryDelay,
+		Timeout:     o.timeout,
+		HTTPClient:  o.httpClient,
+		Mirrors:     o.mirrors,
+		OnStart: func(res downloader.Result) {
+			if verbose {
+				o.progress.report(fmt.Sprintf("下载%s %s", label[res.File.Path], display[res.File.Path]))
 			}
-		}()
-	}
-
-feed:
-	for i := range arts {
-		select {
-		case jobs <- i:
-		case <-ctx.Done():
-			break feed
-		}
-	}
-	close(jobs)
-	wg.Wait()
-
-	if firstErr != nil {
-		return 0, 0, firstErr
-	}
-	if err := ctx.Err(); err != nil {
+		},
+		Progress: func(done, total int, res downloader.Result) {
+			if !verbose {
+				return
+			}
+			if res.Skipped {
+				o.progress.report(fmt.Sprintf("跳过%s %s（已存在） (%d/%d)",
+					label[res.File.Path], display[res.File.Path], done, total))
+				return
+			}
+			o.progress.report(fmt.Sprintf("完成%s %s (%d/%d)",
+				label[res.File.Path], display[res.File.Path], done, total))
+		},
+		BatchProgress: func(done, total, failed int) {
+			if verbose {
+				return
+			}
+			pct := done * 100 / total
+			if pct < lastPct+10 && done != total {
+				return
+			}
+			lastPct = pct
+			if failed > 0 {
+				o.progress.report(fmt.Sprintf("下载进度：%d/%d（%d%%，失败 %d）", done, total, pct, failed))
+				return
+			}
+			o.progress.report(fmt.Sprintf("下载进度：%d/%d（%d%%）", done, total, pct))
+		},
+		FileProgress: func(path string, written, total int64) {
+			if total <= 0 {
+				return
+			}
+			o.progress.report(fmt.Sprintf("下载%s %s（%d/%d，%d%%）",
+				label[path], display[path], written, total, written*100/total))
+		},
+	})
+	if err != nil {
 		return 0, 0, err
+	}
+	for _, res := range results {
+		if res.Skipped {
+			skipped++
+		} else {
+			downloaded++
+		}
 	}
 	return downloaded, skipped, nil
 }
 
-func downloadOneArtifact(ctx context.Context, root string, a artifact, o options) (bool, error) {
-	target, err := mrpack.SafeJoin(root, a.relPath)
-	if err != nil {
-		return false, fmt.Errorf("文件 %q 路径非法: %w", a.relPath, err)
-	}
-	if validExistingArtifact(target, a) {
-		return true, nil
-	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return false, fmt.Errorf("文件 %q 创建目录失败: %w", a.relPath, err)
-	}
-	if err := fetchArtifact(ctx, o, a, target); err != nil {
-		return false, fmt.Errorf("%s %s 下载失败（共尝试 %d 次）: %w", a.label, a.display, o.retries+1, err)
-	}
-	return false, nil
-}
-
-func fetchArtifact(ctx context.Context, o options, a artifact, target string) error {
-	var lastErr error
-	for attempt := 0; attempt <= o.retries; attempt++ {
-		if attempt > 0 {
-			if err := sleepCtx(ctx, retryDelay(o.retryDelay, attempt-1)); err != nil {
-				return err
-			}
-		}
-		err := fetchArtifactOnce(ctx, o.httpClient, a, target)
-		if err == nil {
-			return nil
-		}
-		lastErr = fmt.Errorf("%s: %w", a.url, err)
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-	}
-	return lastErr
-}
-
-func fetchArtifactOnce(ctx context.Context, client *http.Client, a artifact, target string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.url, nil)
-	if err != nil {
-		return err
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
-	}
-
-	limit := a.size
-	if limit <= 0 || limit > maxArtifactBytes {
-		limit = maxArtifactBytes
-	}
-	if resp.ContentLength > limit {
-		return fmt.Errorf("响应大小 %d 超过上限 %d", resp.ContentLength, limit)
-	}
-
-	dir := filepath.Dir(target)
-	tmp, err := os.CreateTemp(dir, ".mtl-fabric-dl-*")
-	if err != nil {
-		return fmt.Errorf("创建临时文件失败: %w", err)
-	}
-	tmpName := tmp.Name()
-	committed := false
-	defer func() {
-		if !committed {
-			os.Remove(tmpName)
-		}
-	}()
-
-	h := newHash(a.kind)
-	n, err := io.Copy(io.MultiWriter(tmp, h), io.LimitReader(resp.Body, limit+1))
-	if err != nil {
-		tmp.Close()
-		return fmt.Errorf("写入临时文件失败: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("关闭临时文件失败: %w", err)
-	}
-	if n > limit {
-		return fmt.Errorf("文件大小超过上限 %d 字节", limit)
-	}
-	got := hex.EncodeToString(h.Sum(nil))
-	if !strings.EqualFold(got, a.sum) {
-		return fmt.Errorf("%w: 得到 %s，期望 %s", errHashMismatch, got, a.sum)
-	}
-	if err := os.Chmod(tmpName, 0o644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpName, target); err != nil {
-		return fmt.Errorf("移动到目标路径失败: %w", err)
-	}
-	committed = true
-	return nil
-}
-
-func validExistingArtifact(path string, a artifact) bool {
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() {
-		return false
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-	h := newHash(a.kind)
-	if _, err := io.Copy(h, f); err != nil {
-		return false
-	}
-	return strings.EqualFold(hex.EncodeToString(h.Sum(nil)), a.sum)
-}
-
-// getBytes 拉取无独立校验和的元数据（大小受限），仍沿用重试与退避模型。
+// getBytes 拉取无独立校验和的元数据（大小受限），复用公共下载层的镜像回退与重试。
 func (o options) getBytes(ctx context.Context, rawURL string, limit int64) ([]byte, error) {
 	if err := validateDownloadURL(rawURL); err != nil {
 		return nil, err
 	}
-	var lastErr error
-	for attempt := 0; attempt <= o.retries; attempt++ {
-		if attempt > 0 {
-			if err := sleepCtx(ctx, retryDelay(o.retryDelay, attempt-1)); err != nil {
-				return nil, err
-			}
-		}
-		data, err := httpGet(ctx, o.httpClient, rawURL, limit)
-		if err == nil {
-			return data, nil
-		}
-		lastErr = err
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-	}
-	return nil, fmt.Errorf("请求失败（共尝试 %d 次）: %w", o.retries+1, lastErr)
-}
-
-func httpGet(ctx context.Context, client *http.Client, rawURL string, limit int64) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
-	}
-	if resp.ContentLength > limit {
-		return nil, fmt.Errorf("响应超过上限 %d 字节", limit)
-	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > limit {
-		return nil, fmt.Errorf("响应超过上限 %d 字节", limit)
-	}
-	return data, nil
-}
-
-func retryDelay(base time.Duration, attempt int) time.Duration {
-	d := base
-	for i := 0; i < attempt && d < maxRetryDelay; i++ {
-		d *= 2
-	}
-	if d > maxRetryDelay {
-		d = maxRetryDelay
-	}
-	return d
-}
-
-func sleepCtx(ctx context.Context, d time.Duration) error {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.C:
-		return nil
-	}
+	return downloader.GetBytes(ctx, rawURL, limit, downloader.RequestOptions{
+		HTTPClient: o.httpClient,
+		Retries:    o.retries,
+		RetryDelay: o.retryDelay,
+		Timeout:    o.timeout,
+		Mirrors:    o.mirrors,
+	})
 }
 
 // writeFileAtomic 用于写入版本 json：先写同目录临时文件再改名。
@@ -396,11 +235,11 @@ func writeFileAtomic(root, rel string, data []byte) error {
 	committed := false
 	defer func() {
 		if !committed {
-			os.Remove(tmpName)
+			_ = tmp.Close()
+			_ = os.Remove(tmpName)
 		}
 	}()
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {

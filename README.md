@@ -8,9 +8,12 @@ MTL 是自用项目，不是成熟的发行版启动器。功能按实际需要�
 
 - **mrpack 整合包安装**：解析 `modrinth.index.json`，下载客户端文件、解压 overrides，并自动安装对应版本的 Fabric 或 Forge loader（Forge 需 Minecraft 1.20.1+）。
 - **mrpack 增量更新**：通过 `.mtl/pack-lock.json` 记录托管文件与 sha256；重复安装时只下载变更文件，并清理新版整合包不再包含的旧托管文件。`saves/`、用户手动新增或修改的文件不会被清理，可用 `--no-prune` 完全关闭清理。
+- **纯净模板安装**：`mtl install --dir <目录> --mc <版本>` 可不依赖 mrpack 直接安装原版 / Fabric / Forge；复用 Mojang 清单、全局 assets 缓存与官方加载器流程，不生成 pack-lock。
 - **加载器抽象**：`internal/loader` 统一 Fabric / Forge 的安装与启动接口；安装时把 `loader_type`、`loader_version` 写入实例配置，旧实例按 profile id 自动识别。
 - **Forge 安装**：下载并校验官方 installer 到全局缓存，准备原版文件与 `launcher_profiles.json`，以非 GUI 方式执行 installer；已安装的 profile 和 installer 缓存会复用。
 - **哈希校验与自动跳过**：下载前校验已有文件的 sha1 / sha512，哈希一致的直接跳过；重复执行安装不会重复下载。
+- **断点续传与原子写入**：所有下载（mod、libraries、assets、Java runtime、mrpack）先写 `*.tmp`，支持 HTTP Range 续传；校验通过后才改名，中断（含 `Ctrl+C`）后重新执行会自动接着下载。
+- **镜像源与日志模式**：可配置 Mojang / mod / Fabric / Forge 镜像，默认优先镜像、失败自动回退官方源；下载日志默认汇总模式（`summary`），`--debug` 或 `--log-mode verbose` 可查看逐文件详情。
 - **实例隔离**：每个整合包一个独立实例目录，mod、配置、存档、库文件互不影响。
 - **Java 运行时自动准备**：按版本要求从 Mojang 官方运行时清单下载并校验，缓存复用；也可用 `--java` 指定本机 Java。
 - **原版资源缓存**：assets 索引与资源对象下载到全局缓存，多个实例共享。
@@ -29,7 +32,8 @@ MTL 是自用项目，不是成熟的发行版启动器。功能按实际需要�
 - 仅有离线账号体系，不接入微软正版登录；启动参数中的 access token 固定为 `0`，用户类型为 `legacy`。
 - 高性能显卡调度仅 Windows 生效，其他平台静默跳过。
 - 崩溃诊断是**静态关键词匹配**，只能覆盖常见模式；复杂崩溃、混淆堆栈或非 Mod 问题仍需人工查看原始日志。
-- 增量清理只识别 `mtl install` 写入 `.mtl/pack-lock.json` 的托管文件；旧实例首次重新安装不会清理历史文件，只会从本次安装开始建立锁定清单。
+- 增量清理只识别 mrpack 安装写入 `.mtl/pack-lock.json` 的托管文件；旧实例首次重新安装不会清理历史文件，只会从本次安装开始建立锁定清单。
+- 纯净模板实例不生成 pack-lock，也不参与整合包清理；其中的 mod、配置与存档完全由用户手动管理。
 - 清理前会校验文件哈希，用户修改过的旧托管文件会保留；`saves/` 与 `.mtl/` 永远不参与清理。
 - 没有图形界面、皮肤/披风、Mod 管理、自动更新等启动器周边功能。
 - Linux arm64 没有 Mojang 官方 Java 运行时，需要 `--java` 指定本机 Java。
@@ -70,6 +74,13 @@ CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -o mtl     ./cmd/mtl
 
 安装会下载整合包声明的客户端文件、解压 overrides，并安装对应的 Fabric / Forge loader。耗时取决于网络，已存在且哈希正确的文件会自动跳过。
 
+如果只想安装纯净实例，可改用模板模式：
+
+```bash
+./mtl install --dir ./instances/vanilla --mc 1.20.1
+./mtl install --dir ./instances/fabric --mc 1.20.1 --loader fabric --loader-version 0.15.11
+```
+
 **2. 添加并绑定默认离线账号**
 
 ```bash
@@ -102,33 +113,74 @@ CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -o mtl     ./cmd/mtl
 
 ### mtl install
 
-安装 mrpack 整合包到实例目录。
+安装实例，支持两种互斥模式：
+
+- **mrpack 整合包模式**：传入一个 `.mrpack` 文件，安装整合包及其声明的加载器。
+- **纯净模板模式**：不依赖整合包，用 `--mc` 指定版本，可选安装 Fabric / Forge。
 
 ```bash
-mtl install --dir <实例目录> [--concurrency N] [--skip-loader] [--no-prune] <pack.mrpack>
+# 模式一：mrpack 整合包
+mtl install --dir <实例目录> [--concurrency N] [--skip-loader] [--no-prune] \
+            [--mirror URL] [--mod-mirror URL] [--retries N] [--timeout 30s] \
+            [--log-mode summary|verbose] [--debug] <pack.mrpack>
+
+# 模式二：纯净模板
+mtl install --dir <实例目录> --mc <版本> [--loader fabric|forge] [--loader-version <版本>] \
+            [--mirror URL] [--mod-mirror URL] [--retries N] [--timeout 30s] \
+            [--log-mode summary|verbose] [--debug]
 ```
 
-| 参数 | 必填 | 说明 |
-| --- | --- | --- |
-| `--dir <目录>` | 是 | 实例目录，不存在时自动创建 |
-| `--concurrency N` | 否 | 并发下载数，缺省为 4 |
-| `--skip-loader` | 否 | 只下载整合包文件，不安装 Fabric / Forge loader |
-| `--no-prune` | 否 | 增量更新时只更新文件，不删除旧版整合包遗留的托管文件 |
-| `<pack.mrpack>` | 是 | mrpack 文件路径 |
+| 参数 | 适用模式 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `--dir <目录>` | 两者 | 是 | 实例目录，不存在时自动创建 |
+| `--concurrency N` | 两者 | 否 | 并发下载数，缺省为 4 |
+| `<pack.mrpack>` | mrpack | 是 | mrpack 文件路径 |
+| `--mc <版本>` | 模板 | 是 | Minecraft 版本，例如 `1.20.1` |
+| `--loader <类型>` | 模板 | 否 | `fabric` 或 `forge`；省略表示纯原版 |
+| `--loader-version <版本>` | 模板 | 条件 | 指定 `--loader` 时必填 |
+| `--skip-loader` | mrpack | 否 | 只下载整合包文件，不安装 Fabric / Forge loader |
+| `--no-prune` | mrpack | 否 | 增量更新时只更新文件，不删除旧版整合包遗留的托管文件 |
+| `--mirror <URL>` | 两者 | 否 | 临时覆盖 Mojang 资源镜像（assets / libraries / 版本元信息），失败自动回退官方源 |
+| `--mod-mirror <URL>` | 两者 | 否 | 临时覆盖 mod 下载源镜像前缀 |
+| `--retries N` | 两者 | 否 | 失败后的额外重试次数；`0` 使用配置值，`-1` 表示不重试 |
+| `--timeout <时长>` | 两者 | 否 | 单文件下载超时，例如 `30s`、`2m`；`0` 表示使用配置值或不限制 |
+| `--log-mode <模式>` | 两者 | 否 | `summary`（默认，批次进度 + 失败清单）或 `verbose`（逐文件） |
+| `--debug` | 两者 | 否 | 输出调试信息，并自动切换为 `verbose` 下载日志 |
 
 示例：
 
 ```bash
+# mrpack 整合包
 ./mtl install --dir ./instances/demo ./test-pack.mrpack
+
+# 纯原版 1.20.1
+./mtl install --dir ./instances/vanilla --mc 1.20.1
+
+# Fabric 1.20.1
+./mtl install --dir ./instances/fabric --mc 1.20.1 --loader fabric --loader-version 0.15.11
+
+# Forge 1.20.1（需 Minecraft 1.20.1+）
+./mtl install --dir ./instances/forge --mc 1.20.1 --loader forge --loader-version 47.4.3
 ```
 
-说明：
+模式冲突会直接报错：mrpack 文件不能与 `--mc` / `--loader` / `--loader-version` 同时使用；`--skip-loader`、`--no-prune` 只适用于 mrpack 模式；`--loader-version` 必须与 `--loader` 一起使用。
+
+#### mrpack 整合包模式
 
 - Fabric 与 Forge 的选择完全由 mrpack 的 `dependencies` 决定。
 - Forge 仅支持 Minecraft 1.20.1+；Forge 版本可写完整形式 `1.20.1-47.4.3`，也可只写 `47.4.3`。
 - 重复安装会复用已校验的文件、已安装的 Forge profile 与 installer 缓存，不会重复执行 installer。
 
-增量更新说明：
+#### 纯净模板模式
+
+- 从 Mojang 官方版本清单校验版本号，下载版本 json、client jar 与 libraries；assets 写入全局缓存，多个实例共享。
+- 纯原版会生成一个 `inheritsFrom` 原版的薄 profile（`versions/<版本>-mtl-vanilla/`），现有 `mtl run` 无需额外参数即可启动。
+- Fabric 通过 Fabric meta 安装；Forge 复用官方 installer 流程，要求 Minecraft 1.20.1+。
+- 写入 `.mtl/config.json` 的 `loader_type`、`loader_version` 与 `install_mode=template`，`mtl info` 会标记为「手动纯净模板」。
+- **不会写入 `.mtl/pack-lock.json`**，因此手动放入的 mod、配置和存档永远不会触发整合包清理逻辑。
+- 已存在且哈希正确的文件会自动跳过，可安全重复执行；网络失败或版本不存在会输出明确的中文错误。
+
+增量更新说明（仅 mrpack 模式）：
 
 - 安装完成后写入 `.mtl/pack-lock.json`，记录整合包名称/版本、来源路径，以及所有由 mrpack 自动下载或解压的托管文件（相对路径 + `sha256-` 哈希）。
 - 再次安装同一个整合包时，会对比新旧锁定清单并输出“新增 / 更新 / 待删除”摘要；新版不再声明的旧托管文件会先打印列表再删除。
@@ -143,7 +195,9 @@ mtl install --dir <实例目录> [--concurrency N] [--skip-loader] [--no-prune] 
 ```bash
 mtl run --dir <实例目录> [--account <账号>] [--username <名字>] [--memory <内存>] \
         [--memory-auto] [--highperf-gpu|--no-highperf-gpu] [--java <路径>] \
-        [--jvm-arg <参数>]... [--game-arg <参数>]... [--debug]
+        [--jvm-arg <参数>]... [--game-arg <参数>]... \
+        [--mirror URL] [--mod-mirror URL] [--retries N] [--timeout 30s] \
+        [--log-mode summary|verbose] [--debug]
 ```
 
 | 参数 | 说明 |
@@ -158,7 +212,12 @@ mtl run --dir <实例目录> [--account <账号>] [--username <名字>] [--memor
 | `--java <路径>` | 指定 java 可执行文件，跳过官方运行时下载 |
 | `--jvm-arg <参数>` | 追加 JVM 参数，可重复 |
 | `--game-arg <参数>` | 追加游戏参数，可重复 |
-| `--debug` | 打印配置来源、完整启动命令和调试信息 |
+| `--mirror <URL>` | 本次启动临时覆盖 Mojang 资源镜像，失败自动回退官方源 |
+| `--mod-mirror <URL>` | 本次启动临时覆盖 mod 下载源镜像前缀 |
+| `--retries N` | 下载失败后的额外重试次数；`0` 使用配置值，`-1` 表示不重试 |
+| `--timeout <时长>` | 单文件下载超时，例如 `30s`、`2m` |
+| `--log-mode <模式>` | 下载日志粒度：`summary`（默认）或 `verbose` |
+| `--debug` | 打印配置来源、完整启动命令和调试信息，并切换为 `verbose` 下载日志 |
 
 示例：
 
@@ -252,13 +311,14 @@ mtl info <实例名> [--dir <实例根目录>]
 - Java 路径为空 → 自动匹配，视为正常；路径不存在或不可执行 → 标记异常。
 - `loader_type` / `loader_version` 为空 → 警告并显示 `-`，不影响命令成功。
 - 未绑定默认账号 → 警告。
-- 加载器不是 `fabric` / `forge` → 警告。
+- 加载器不是 `vanilla` / `fabric` / `forge` → 警告。
 
 说明：
 
 - 只读操作，不修改任何配置文件，也不启动游戏。
 - Java 检查只校验文件是否存在、是否为可执行文件，不会执行 `java -version`。
-- 元信息会展示整合包版本、`.mtl/pack-lock.json` 是否存在及托管文件数量、整合包来源；锁定清单损坏时显示读取失败，不影响其他检查。
+- mrpack 实例的元信息会展示整合包版本、`.mtl/pack-lock.json` 是否存在及托管文件数量、整合包来源；锁定清单损坏时显示读取失败，不影响其他检查。
+- 纯净模板实例标记为「手动纯净模板」，不展示 pack-lock 相关信息。
 
 ### mtl account
 
@@ -305,6 +365,8 @@ mtl config remove-jvm-arg --dir <实例目录> <参数>
 mtl config add-game-arg --dir <实例目录> <参数>
 mtl config remove-game-arg --dir <实例目录> <参数>
 mtl config reset --dir <实例目录>
+mtl config global（显示全局配置）
+mtl config set-mirror <类型> <镜像地址>（传空字符串恢复官方源）
 ```
 
 | 子命令 | 说明 |
@@ -321,6 +383,8 @@ mtl config reset --dir <实例目录>
 | `add-game-arg <参数>` | 添加一条游戏参数 |
 | `remove-game-arg <参数>` | 删除第一条匹配的游戏参数 |
 | `reset` | 将实例配置重置为默认值（包括解绑默认账号） |
+| `global` | 显示全局配置路径与内容（镜像源、下载日志模式等） |
+| `set-mirror <类型> <地址>` | 修改全局镜像；类型：`mojang`、`assets`、`libraries`、`version-meta`、`mod`、`fabric`、`forge` |
 
 示例：
 
@@ -336,7 +400,44 @@ mtl config reset --dir <实例目录>
 ./mtl config remove-jvm-arg --dir ./instances/demo "-XX:+UseG1GC"
 ./mtl config add-game-arg --dir ./instances/demo "--width"
 ./mtl config reset --dir ./instances/demo
+./mtl config global
+./mtl config set-mirror mojang https://mirror.example/mc
+./mtl config set-mirror mojang ""     # 恢复官方源
 ```
+
+#### 全局配置与下载层
+
+全局配置对所有实例生效，与实例配置分离：
+
+- Windows：`%APPDATA%/mtl/config.json`
+- Linux / macOS：`~/.config/mtl/config.json`
+- 可用环境变量 `MTL_CONFIG_PATH` 指定其他路径
+
+```json
+{
+  "mirrors": {
+    "mojang": "https://mirror.example/mc",
+    "assets": "",
+    "libraries": "",
+    "version_meta": "",
+    "mod": "",
+    "fabric": "",
+    "forge": ""
+  },
+  "download": {
+    "log_mode": "summary",
+    "retries": 0,
+    "timeout": "30s",
+    "concurrency": 4
+  }
+}
+```
+
+优先级：**命令行参数 > 环境变量 > 全局配置文件 > 默认官方源**。镜像只替换域名（以及镜像自带的前缀路径），资源路径保持不变；镜像请求失败后自动回退原始官方地址。
+
+环境变量：`MTL_MOJANG_MIRROR`、`MTL_ASSETS_MIRROR`、`MTL_LIBRARIES_MIRROR`、`MTL_VERSION_META_MIRROR`、`MTL_MOD_MIRROR`、`MTL_FABRIC_MIRROR`、`MTL_FORGE_MIRROR`、`MTL_DOWNLOAD_LOG`、`MTL_DOWNLOAD_RETRIES`、`MTL_DOWNLOAD_TIMEOUT`、`MTL_DOWNLOAD_CONCURRENCY`。
+
+下载失败会继续处理其他文件，最后按「网络失败 / 哈希校验失败 / 不支持断点续传 / 本地文件错误」汇总；中断后重新执行同一命令会从 `*.tmp` 继续下载。
 
 解绑默认账号（传空字符串）：
 
@@ -367,14 +468,14 @@ instances/
 └── demo/
     ├── .mtl/
     │   ├── config.json          # MTL 实例配置
-    │   └── pack-lock.json       # 整合包托管文件锁定清单（仅 mrpack 实例）
+    │   └── pack-lock.json       # 整合包托管文件锁定清单（仅 mrpack 实例，纯净模板没有）
     ├── crash_reports/           # MTL 归档的崩溃日志（下划线）
     ├── crash-reports/           # Minecraft 原版生成的崩溃日志（连字符，崩溃后出现）
     ├── mods/                    # 整合包 mod
     ├── config/                  # 整合包自带配置
     ├── libraries/               # 游戏库与 Fabric / Forge loader 库
     ├── versions/                # 原版版本 json/jar 与加载器 profile
-    ├── launcher_profiles.json   # Forge installer 前置文件（仅 Forge 实例需要）
+    ├── launcher_profiles.json   # Forge installer 前置文件；纯净模板也会生成最小骨架
     ├── logs/
     ├── saves/
     └── ...                      # resourcepacks、data、downloads 等由整合包决定
@@ -415,6 +516,7 @@ Linux / macOS：`~/.cache/mtl/` 下为相同结构。
   "default_account": "",
   "loader_type": "",
   "loader_version": "",
+  "install_mode": "",
   "java": ""
 }
 ```
@@ -427,8 +529,9 @@ Linux / macOS：`~/.cache/mtl/` 下为相同结构。
 | `game_args` | string[] | 追加的游戏参数，只排在主类之后 |
 | `prefer_high_perf_gpu` | bool | 是否启用高性能显卡调度，仅 Windows 生效，默认 `false` |
 | `default_account` | string | 实例默认离线账号名；空字符串表示未绑定 |
-| `loader_type` | string | 安装时使用的加载器：`fabric` / `forge`；由 `mtl install` 写入，旧实例为空时按 profile id 推断 |
-| `loader_version` | string | 加载器版本，如 Fabric loader 版本或 Forge `1.20.1-47.4.3`；由 `mtl install` 写入 |
+| `loader_type` | string | 安装时使用的加载器：`vanilla` / `fabric` / `forge`；由 `mtl install` 写入，旧实例为空时按 profile id 推断 |
+| `loader_version` | string | 加载器版本；纯原版记录 Minecraft 版本，Fabric/Forge 记录加载器版本；由 `mtl install` 写入 |
+| `install_mode` | string | `template` 表示不依赖 mrpack 的纯净模板实例；留空表示 mrpack 实例。由 `mtl install --mc` 写入 |
 | `java` | string | 上次成功启动使用的 Java 可执行文件绝对路径；空表示自动匹配。路径失效时自动重新匹配 |
 
 补充说明：
@@ -482,7 +585,9 @@ Linux / macOS：`~/.cache/mtl/` 下为相同结构。
 
 - `internal/mrpack`：mrpack 解析、路径安全（`SafeJoin` / `ValidateRelPath`）、overrides 解压、pack-lock 锁定清单与增量清理
 - `internal/downloader`：并发下载、哈希校验、失败重试
-- `internal/loader`：加载器统一抽象与按类型构造（Fabric / Forge，NeoForge 预留）
+- `internal/loader`：加载器统一抽象与按类型构造（Vanilla / Fabric / Forge，NeoForge 预留）
+- `internal/vanilla`：纯原版模板安装、薄 profile 与 assetIndex 元数据解析
+- `internal/template`：不依赖 mrpack 的模板安装编排（纯原版 / Fabric / Forge）
 - `internal/fabric`：Fabric loader 安装、原版版本文件准备
 - `internal/forge`：Forge installer 下载与调用、profile/libraries 准备（Minecraft 1.20.1+）
 - `internal/runtime`：Mojang 官方 Java 运行时下载、校验、缓存
@@ -523,9 +628,10 @@ go test ./...
    - `--no-prune` 可完全关闭清理，只更新文件。
    - 验收：同一实例连续安装 v1 → v2 后 `mods/` 无 v1 残留，存档与手动文件保留。
 
-2. **不依赖整合包的原版 / 加载器安装**
+2. ✅ **不依赖整合包的原版 / 加载器安装（已实现）**
    - 新增 `mtl install --dir <目录> --mc <版本> [--loader fabric|forge] [--loader-version <版本>]`。
-   - 复用现有 `fabric` / `forge` / `runtime` 包；`--loader` 省略时只装原版。
+   - 复用现有 `fabric` / `forge` / `assets` 包；`--loader` 省略时只装原版。
+   - 写入 `install_mode=template`，不生成 pack-lock；`mtl info` 标记为手动纯净模板。
    - 验收：空目录安装 1.20.1 原版、Fabric、Forge 后均可直接 `mtl run`。
 
 3. **下载断点续传与镜像源**

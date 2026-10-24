@@ -11,10 +11,12 @@ import (
 	"mtl/internal/config"
 	"mtl/internal/fabric"
 	"mtl/internal/forge"
+	"mtl/internal/vanilla"
 )
 
 // 加载器类型标识；neoforge 仅为预留枚举，本阶段不提供实现。
 const (
+	TypeVanilla  = "vanilla"
 	TypeFabric   = "fabric"
 	TypeForge    = "forge"
 	TypeNeoForge = "neoforge"
@@ -34,8 +36,9 @@ type Loader interface {
 
 // Options 允许调用方注入加载器端点、并发与进度回调（测试或镜像场景）。
 type Options struct {
-	Fabric fabric.Options
-	Forge  forge.Options
+	Vanilla vanilla.Options
+	Fabric  fabric.Options
+	Forge   forge.Options
 }
 
 // NewLoader 使用默认选项构造加载器。
@@ -49,6 +52,8 @@ func NewLoaderWithOptions(loaderType, mcVersion string, opts Options) (Loader, e
 	t := strings.ToLower(strings.TrimSpace(loaderType))
 	mcVersion = strings.TrimSpace(mcVersion)
 	switch t {
+	case TypeVanilla:
+		return vanilla.NewLoader(mcVersion, opts.Vanilla)
 	case TypeFabric:
 		if mcVersion == "" {
 			return nil, errors.New("Minecraft 版本为空")
@@ -78,6 +83,8 @@ func Detect(profileID string) string {
 		return TypeQuilt
 	case strings.Contains(p, TypeForge):
 		return TypeForge
+	case strings.Contains(p, TypeVanilla):
+		return TypeVanilla
 	default:
 		return TypeFabric
 	}

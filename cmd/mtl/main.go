@@ -23,6 +23,7 @@ import (
 	"mtl/internal/memory"
 	"mtl/internal/mrpack"
 	"mtl/internal/runtime"
+	"mtl/internal/template"
 )
 
 func main() {
@@ -63,8 +64,9 @@ func run(args []string) error {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "用法:")
-	fmt.Fprintln(os.Stderr, "  mtl install --dir <实例目录> [--concurrency N] [--skip-loader] [--no-prune] <pack.mrpack>（支持 Fabric / Forge 1.20.1+）")
-	fmt.Fprintln(os.Stderr, "  mtl run --dir <实例目录> [--account <账号>] [--username <名字>] [--memory <内存>] [--memory-auto] [--highperf-gpu|--no-highperf-gpu] [--java <java路径>] [--jvm-arg <参数>]... [--game-arg <参数>]... [--debug]")
+	fmt.Fprintln(os.Stderr, "  mtl install --dir <实例目录> [--concurrency N] [--skip-loader] [--no-prune] [--mirror URL] [--mod-mirror URL] [--retries N] [--timeout 30s] [--log-mode summary|verbose] [--debug] <pack.mrpack>（整合包模式，支持 Fabric / Forge 1.20.1+）")
+	fmt.Fprintln(os.Stderr, "  mtl install --dir <实例目录> --mc <版本号> [--loader fabric|forge] [--loader-version <版本>] [--concurrency N] [--mirror URL] [--mod-mirror URL] [--retries N] [--timeout 30s] [--log-mode summary|verbose] [--debug]（纯净模板模式）")
+	fmt.Fprintln(os.Stderr, "  mtl run --dir <实例目录> [--account <账号>] [--username <名字>] [--memory <内存>] [--memory-auto] [--highperf-gpu|--no-highperf-gpu] [--java <java路径>] [--jvm-arg <参数>]... [--game-arg <参数>]... [--mirror URL] [--mod-mirror URL] [--retries N] [--timeout 30s] [--log-mode summary|verbose] [--debug]")
 	fmt.Fprintln(os.Stderr, "  mtl inspect [--extract <dir>] <pack.mrpack>")
 	fmt.Fprintln(os.Stderr, "  mtl list [--dir <实例根目录>]（默认 ./instances）")
 	fmt.Fprintln(os.Stderr, "  mtl info [--dir <实例根目录>] <实例名>")
@@ -79,34 +81,151 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  mtl config add-jvm-arg|remove-jvm-arg --dir <实例目录> <参数>")
 	fmt.Fprintln(os.Stderr, "  mtl config add-game-arg|remove-game-arg --dir <实例目录> <参数>")
 	fmt.Fprintln(os.Stderr, "  mtl config reset --dir <实例目录>")
+	fmt.Fprintln(os.Stderr, "  mtl config global（显示全局配置路径与内容）")
+	fmt.Fprintln(os.Stderr, "  mtl config set-mirror <mojang|assets|libraries|version-meta|mod|fabric|forge> <镜像地址>")
 	fmt.Fprintln(os.Stderr, "  mtl version")
 }
 
 func install(args []string) error {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	dir := fs.String("dir", "", "实例目录（必填）")
-	concurrency := fs.Int("concurrency", 0, "并发下载数，0 表示使用默认值")
-	skipLoader := fs.Bool("skip-loader", false, "跳过加载器（Fabric/Forge）安装")
-	noPrune := fs.Bool("no-prune", false, "增量更新时不删除旧版整合包遗留的托管文件")
+	concurrency := fs.Int("concurrency", 0, "并发下载数，0 表示使用配置/默认值")
+	skipLoader := fs.Bool("skip-loader", false, "跳过加载器（Fabric/Forge）安装（仅 mrpack 模式）")
+	noPrune := fs.Bool("no-prune", false, "增量更新时不删除旧版整合包遗留的托管文件（仅 mrpack 模式）")
+	mcVersion := fs.String("mc", "", "Minecraft 版本号，例如 1.20.1（纯净模板模式必填）")
+	loaderType := fs.String("loader", "", "加载器类型：fabric 或 forge；省略表示纯原版")
+	loaderVersion := fs.String("loader-version", "", "加载器版本，必须与 --loader 一起使用")
+	debug := fs.Bool("debug", false, "输出每个文件的下载详情（等价 --log-mode verbose）")
+	dl := addDownloadFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if fs.NArg() != 1 {
-		return fmt.Errorf("用法: mtl install --dir <实例目录> [--concurrency N] [--skip-loader] [--no-prune] <pack.mrpack>")
+	explicit := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
+
+	if fs.NArg() > 1 {
+		return fmt.Errorf("用法: mtl install --dir <实例目录> [--concurrency N] [--skip-loader] [--no-prune] <pack.mrpack>；或 mtl install --dir <实例目录> --mc <版本号> [--loader fabric|forge] [--loader-version <版本>]")
 	}
 	if *dir == "" {
 		return fmt.Errorf("必须用 --dir 指定实例目录")
 	}
-	return installPack(fs.Arg(0), *dir, installOptions{concurrency: *concurrency, skipLoader: *skipLoader, noPrune: *noPrune}, os.Stdout)
+
+	settings, err := resolveDownloadSettings(fs, dl, *concurrency, *debug)
+	if err != nil {
+		return err
+	}
+	if *debug {
+		fmt.Fprintf(os.Stdout, "[Download] 日志模式: %s，并发: %d，重试: %d\n",
+			logModeName(settings.LogMode), settings.Concurrency, settings.Retries)
+	}
+
+	if fs.NArg() == 1 {
+		if explicit["mc"] || explicit["loader"] || explicit["loader-version"] {
+			return fmt.Errorf("mrpack 文件与 --mc / --loader / --loader-version 不能同时使用，请二选一")
+		}
+		return installPack(fs.Arg(0), *dir, installOptions{
+			concurrency: *concurrency,
+			skipLoader:  *skipLoader,
+			noPrune:     *noPrune,
+			download:    settings,
+		}, os.Stdout)
+	}
+
+	if explicit["skip-loader"] {
+		return fmt.Errorf("--skip-loader 仅适用于 mrpack 安装；纯净模板模式请省略 --loader 安装纯原版")
+	}
+	if explicit["no-prune"] {
+		return fmt.Errorf("--no-prune 仅适用于 mrpack 安装；纯净模板实例不生成 pack-lock")
+	}
+	if strings.TrimSpace(*mcVersion) == "" {
+		return fmt.Errorf("纯净模板模式必须用 --mc 指定 Minecraft 版本，或传入 mrpack 文件")
+	}
+	if explicit["loader-version"] && strings.TrimSpace(*loaderType) == "" {
+		return fmt.Errorf("--loader-version 必须与 --loader 一起使用")
+	}
+	if strings.TrimSpace(*loaderType) != "" && strings.TrimSpace(*loaderVersion) == "" {
+		return fmt.Errorf("使用 --loader 时必须同时指定 --loader-version")
+	}
+	return installTemplate(*dir, template.Options{
+		MinecraftVersion: strings.TrimSpace(*mcVersion),
+		LoaderType:       *loaderType,
+		LoaderVersion:    *loaderVersion,
+		Fabric: fabric.Options{
+			Concurrency: settings.Concurrency,
+			Retries:     settings.Retries,
+			Timeout:     settings.Timeout,
+			Mirrors:     settings.Mirrors,
+			LogMode:     settings.LogMode,
+			Progress: func(msg string) {
+				fmt.Fprintf(os.Stdout, "[Fabric] %s\n", msg)
+			},
+		},
+		Forge: forge.Options{
+			Concurrency: settings.Concurrency,
+			Retries:     settings.Retries,
+			Timeout:     settings.Timeout,
+			Mirrors:     settings.Mirrors,
+			LogMode:     settings.LogMode,
+			Progress: func(msg string) {
+				fmt.Fprintf(os.Stdout, "[Forge] %s\n", msg)
+			},
+		},
+		Assets: assets.Options{
+			Concurrency: settings.Concurrency,
+			Retries:     settings.Retries,
+			Timeout:     settings.Timeout,
+			Mirrors:     settings.Mirrors,
+			LogMode:     settings.LogMode,
+			Progress: func(msg string) {
+				fmt.Fprintf(os.Stdout, "[Assets] %s\n", msg)
+			},
+		},
+		Progress: func(msg string) {
+			fmt.Fprintf(os.Stdout, "[Template] %s\n", msg)
+		},
+	}, os.Stdout)
+}
+
+// installTemplate 执行不依赖 mrpack 的纯净模板安装，输出与 mrpack 模式一致。
+func installTemplate(dir string, opts template.Options, out io.Writer) error {
+	if out == nil {
+		out = io.Discard
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	res, err := template.Install(ctx, dir, opts)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
+		return err
+	}
+	if res.LoaderType == "" {
+		fmt.Fprintf(out, "实例安装完成: %s（纯原版 Minecraft %s）\n", dir, res.MinecraftVersion)
+	} else {
+		fmt.Fprintf(out, "实例安装完成: %s（%s %s / Minecraft %s）\n",
+			dir, res.LoaderType, res.LoaderVersion, res.MinecraftVersion)
+	}
+	return nil
 }
 
 type installOptions struct {
 	concurrency int
 	skipLoader  bool
 	noPrune     bool
+	// download 是下载层参数（镜像、重试、超时、日志模式）。
+	download downloadSettings
 	// fabric / forge 仅用于测试注入 mock 服务地址；零值使用官方端点。
 	fabric fabric.Options
 	forge  forge.Options
+}
+
+func logModeName(m downloader.LogMode) string {
+	if m == downloader.LogVerbose {
+		return "verbose"
+	}
+	return "summary"
 }
 
 // installPack 初始化实例目录、下载客户端文件、解压 overrides，最后安装 Fabric loader。
@@ -118,6 +237,11 @@ func installPack(packPath, dir string, opts installOptions, out io.Writer) error
 	}
 	defer p.Close()
 
+	// 兼容测试与旧调用方：未解析出下载设置时回落到 installOptions.concurrency。
+	concurrency := opts.download.Concurrency
+	if concurrency <= 0 {
+		concurrency = opts.concurrency
+	}
 	idx := p.Index
 	loaderType, loaderVersion := idx.Loader()
 	files := idx.ClientFiles()
@@ -133,14 +257,45 @@ func installPack(packPath, dir string, opts installOptions, out io.Writer) error
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
+	verbose := opts.download.LogMode == downloader.LogVerbose
+	lastPct := -10
 	results, err := downloader.Download(ctx, dir, files, downloader.Options{
-		Concurrency: opts.concurrency,
+		Concurrency: concurrency,
+		Retries:     opts.download.Retries,
+		Timeout:     opts.download.Timeout,
+		Mirrors:     opts.download.Mirrors,
 		Progress: func(done, total int, res downloader.Result) {
+			if !verbose {
+				return
+			}
 			note := ""
 			if res.Skipped {
 				note = "（已存在，跳过）"
 			}
 			fmt.Fprintf(out, "[%d/%d] %s%s\n", done, total, res.File.Path, note)
+		},
+		// summary 模式只输出批次进度，避免大量 mod 文件刷屏。
+		BatchProgress: func(done, total, failed int) {
+			if verbose {
+				return
+			}
+			pct := done * 100 / total
+			if pct < lastPct+10 && done != total {
+				return
+			}
+			lastPct = pct
+			if failed > 0 {
+				fmt.Fprintf(out, "[Download] 下载进度：%d/%d（%d%%，失败 %d）\n", done, total, pct, failed)
+				return
+			}
+			fmt.Fprintf(out, "[Download] 下载进度：%d/%d（%d%%）\n", done, total, pct)
+		},
+		// 大文件（mod 等）保留百分比进度。
+		FileProgress: func(path string, written, total int64) {
+			if total <= 0 {
+				return
+			}
+			fmt.Fprintf(out, "[Download] 下载 %s（%d/%d，%d%%）\n", path, written, total, written*100/total)
 		},
 	})
 	if err != nil {
@@ -174,11 +329,19 @@ func installPack(packPath, dir string, opts installOptions, out io.Writer) error
 		Fabric: opts.fabric,
 		Forge:  opts.forge,
 	}
-	loaderOpts.Fabric.Concurrency = opts.concurrency
+	loaderOpts.Fabric.Concurrency = concurrency
+	loaderOpts.Fabric.Retries = opts.download.Retries
+	loaderOpts.Fabric.Timeout = opts.download.Timeout
+	loaderOpts.Fabric.Mirrors = opts.download.Mirrors
+	loaderOpts.Fabric.LogMode = opts.download.LogMode
 	loaderOpts.Fabric.Progress = func(msg string) {
 		fmt.Fprintf(out, "[Fabric] %s\n", msg)
 	}
-	loaderOpts.Forge.Concurrency = opts.concurrency
+	loaderOpts.Forge.Concurrency = concurrency
+	loaderOpts.Forge.Retries = opts.download.Retries
+	loaderOpts.Forge.Timeout = opts.download.Timeout
+	loaderOpts.Forge.Mirrors = opts.download.Mirrors
+	loaderOpts.Forge.LogMode = opts.download.LogMode
 	loaderOpts.Forge.Progress = func(msg string) {
 		fmt.Fprintf(out, "[Forge] %s\n", msg)
 	}
@@ -299,7 +462,8 @@ func runInstance(args []string) error {
 	javaPath := fs.String("java", "", "java 可执行文件完整路径；不传则自动使用 Mojang 官方 Java 运行时")
 	highPerfGPU := fs.Bool("highperf-gpu", false, "本次启动强制优先使用高性能显卡（覆盖实例配置，仅 Windows 生效）")
 	noHighPerfGPU := fs.Bool("no-highperf-gpu", false, "本次启动强制关闭高性能显卡调度（覆盖实例配置）")
-	debug := fs.Bool("debug", false, "打印完整启动命令")
+	debug := fs.Bool("debug", false, "打印完整启动命令，并切换为 verbose 下载日志")
+	dl := addDownloadFlags(fs)
 	// --jvm-arg 与 --game-arg 分开收集：前者进 JVM 参数区，后者只进主类之后的游戏参数区。
 	var extraJVM stringList
 	fs.Var(&extraJVM, "jvm-arg", "追加 JVM 参数（可重复），排在内存参数之后、主类之前")
@@ -338,6 +502,10 @@ func runInstance(args []string) error {
 	if *dir == "" {
 		return fmt.Errorf("必须用 --dir 指定实例目录")
 	}
+	settings, err := resolveDownloadSettings(fs, dl, 0, *debug)
+	if err != nil {
+		return err
+	}
 
 	// 实例配置优先级低于命令行：--memory 覆盖实例内存设置，--memory-auto 强制自动内存；
 	// --highperf-gpu/--no-highperf-gpu 覆盖实例的高性能显卡设置。
@@ -349,6 +517,8 @@ func runInstance(args []string) error {
 		fmt.Fprintf(os.Stdout, "[Config] 读取到的实例配置:\n%s\n", config.Format(instanceCfg))
 		fmt.Fprintf(os.Stdout, "[Config] 内存来源: %s\n", memChoice.Source)
 		fmt.Fprintf(os.Stdout, "[Config] 高性能显卡调度: %v（来源: %s）\n", preferHighPerfGPU, gpuSource)
+		fmt.Fprintf(os.Stdout, "[Config] 下载日志模式: %s，并发: %d，重试: %d\n",
+			logModeName(settings.LogMode), settings.Concurrency, settings.Retries)
 	}
 	mem, err := resolveMemory(memChoice.Value, memChoice.Auto, memChoice.ValueSet, os.Stdout, os.Stderr)
 	if err != nil {
@@ -393,6 +563,10 @@ func runInstance(args []string) error {
 			spec.MajorVersion = inst.Vanilla.JavaVersion.MajorVersion
 		}
 		resolvedJava, err = runtime.Ensure(ctx, spec, runtime.Options{
+			Concurrency: settings.Concurrency,
+			Retries:     settings.Retries,
+			Timeout:     settings.Timeout,
+			Mirrors:     settings.Mirrors,
 			Progress: func(msg string) {
 				fmt.Fprintf(os.Stdout, "[Runtime] %s\n", msg)
 			},
@@ -420,6 +594,11 @@ func runInstance(args []string) error {
 		SHA1: inst.Vanilla.AssetIndex.SHA1,
 		Size: inst.Vanilla.AssetIndex.Size,
 	}, assets.Options{
+		Concurrency: settings.Concurrency,
+		Retries:     settings.Retries,
+		Timeout:     settings.Timeout,
+		Mirrors:     settings.Mirrors,
+		LogMode:     settings.LogMode,
 		Progress: func(msg string) {
 			fmt.Fprintf(os.Stdout, "[Assets] %s\n", msg)
 		},

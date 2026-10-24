@@ -175,7 +175,9 @@ func (l *Loader) ensureProfileLibraries(ctx context.Context, instanceDir string,
 		Concurrency: l.opts.Concurrency,
 		Retries:     l.retries(),
 		RetryDelay:  l.opts.RetryDelay,
+		Timeout:     l.opts.Timeout,
 		HTTPClient:  l.httpClient(),
+		Mirrors:     l.opts.Mirrors,
 	}); err != nil {
 		return fmt.Errorf("校验 Forge 库文件失败: %w", err)
 	}

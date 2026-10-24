@@ -67,7 +67,7 @@ func assertNoTempFiles(t *testing.T, dir string) {
 	t.Helper()
 	var found []string
 	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
-		if err == nil && strings.HasPrefix(d.Name(), ".mtl-dl-") {
+		if err == nil && (strings.HasPrefix(d.Name(), ".mtl-dl-") || strings.HasSuffix(d.Name(), ".tmp")) {
 			found = append(found, p)
 		}
 		return nil

@@ -357,3 +357,45 @@ func TestSaveRejectsInvalidConfig(t *testing.T) {
 		t.Fatalf("Save 非法配置 err = %v", err)
 	}
 }
+
+func TestSetLoaderInfoPreservesExistingFields(t *testing.T) {
+	dir := t.TempDir()
+	if err := Save(dir, Config{
+		MemoryMode:     "manual",
+		ManualMemory:   "6G",
+		JVMArgs:        []string{"-XX:+UseG1GC"},
+		DefaultAccount: "steve",
+	}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := SetLoaderInfo(dir, "vanilla", "1.20.1", InstallModeTemplate); err != nil {
+		t.Fatalf("SetLoaderInfo: %v", err)
+	}
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.LoaderType != "vanilla" || cfg.LoaderVersion != "1.20.1" || cfg.InstallMode != InstallModeTemplate {
+		t.Fatalf("加载器信息未写入: %+v", cfg)
+	}
+	if cfg.MemoryMode != "manual" || cfg.ManualMemory != "6G" || cfg.DefaultAccount != "steve" {
+		t.Fatalf("既有配置被覆盖: %+v", cfg)
+	}
+	if !reflect.DeepEqual(cfg.JVMArgs, []string{"-XX:+UseG1GC"}) {
+		t.Fatalf("JVM 参数被覆盖: %+v", cfg.JVMArgs)
+	}
+}
+
+func TestSetLoaderInfoCreatesMissingConfig(t *testing.T) {
+	dir := t.TempDir()
+	if err := SetLoaderInfo(dir, "fabric", "0.15.11", InstallModeTemplate); err != nil {
+		t.Fatalf("SetLoaderInfo: %v", err)
+	}
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.LoaderType != "fabric" || cfg.LoaderVersion != "0.15.11" || cfg.InstallMode != InstallModeTemplate {
+		t.Fatalf("配置未创建: %+v", cfg)
+	}
+}

@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"mtl/internal/downloader"
 )
 
 func testSHA1(s string) string {
@@ -146,6 +148,7 @@ func TestEnsureDownloadsIndexAndObjects(t *testing.T) {
 		ObjectsBaseURL: srv.URL + "/objects/",
 		Retries:        -1,
 		RetryDelay:     time.Millisecond,
+		LogMode:        downloader.LogVerbose,
 		Progress: func(msg string) {
 			mu.Lock()
 			logs = append(logs, msg)

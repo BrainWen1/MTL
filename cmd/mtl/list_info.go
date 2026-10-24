@@ -98,16 +98,6 @@ func infoCommand(args []string) error {
 	fmt.Println(config.Format(e.Config))
 
 	fmt.Println("[Instance] 元信息:")
-	packVersion, lockState, packSource := "-", "不存在", "-"
-	lock, lockErr := mrpack.LoadLock(e.Dir)
-	switch {
-	case lockErr != nil:
-		lockState = "读取失败: " + lockErr.Error()
-	case lock != nil:
-		packVersion = orDash(lock.PackVersion)
-		lockState = fmt.Sprintf("存在（%d 个托管文件）", len(lock.Files))
-		packSource = orDash(lock.Source)
-	}
 	meta := [][2]string{
 		{"加载器类型", orDash(e.Config.LoaderType)},
 		{"加载器版本", orDash(e.Config.LoaderVersion)},
@@ -119,9 +109,26 @@ func infoCommand(args []string) error {
 		{"JVM 参数", fmt.Sprintf("%d 项", len(e.Config.JVMArgs))},
 		{"游戏参数", fmt.Sprintf("%d 项", len(e.Config.GameArgs))},
 		{"高性能显卡", fmt.Sprintf("%v", e.Config.PreferHighPerfGPU)},
-		{"整合包版本", packVersion},
-		{"锁定清单", lockState},
-		{"整合包来源", packSource},
+	}
+	// 纯净模板实例不展示 mrpack 锁定信息，避免被误认为整合包实例。
+	if e.Config.InstallMode == config.InstallModeTemplate {
+		meta = append(meta, [2]string{"实例类型", "手动纯净模板"})
+	} else {
+		packVersion, lockState, packSource := "-", "不存在", "-"
+		lock, lockErr := mrpack.LoadLock(e.Dir)
+		switch {
+		case lockErr != nil:
+			lockState = "读取失败: " + lockErr.Error()
+		case lock != nil:
+			packVersion = orDash(lock.PackVersion)
+			lockState = fmt.Sprintf("存在（%d 个托管文件）", len(lock.Files))
+			packSource = orDash(lock.Source)
+		}
+		meta = append(meta,
+			[2]string{"整合包版本", packVersion},
+			[2]string{"锁定清单", lockState},
+			[2]string{"整合包来源", packSource},
+		)
 	}
 	writeKeyValue(os.Stdout, meta)
 

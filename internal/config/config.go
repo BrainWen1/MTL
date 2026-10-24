@@ -25,6 +25,9 @@ const (
 	ModeAuto = "auto"
 	// ModeManual 使用 ManualMemory 指定最大堆。
 	ModeManual = "manual"
+
+	// InstallModeTemplate 表示实例由 `mtl install --mc ...` 创建，是不依赖 mrpack 的纯净模板。
+	InstallModeTemplate = "template"
 )
 
 // Config 对应 .mtl/config.json 的结构。
@@ -44,6 +47,9 @@ type Config struct {
 	// 旧版本实例没有这两个字段，读取后为空，由 launch 按 profile id 兼容推断。
 	LoaderType    string `json:"loader_type"`
 	LoaderVersion string `json:"loader_version"`
+	// InstallMode 记录实例安装方式；template 表示不依赖 mrpack 的纯净模板实例。
+	// 旧实例与 mrpack 实例为空，保持向后兼容。
+	InstallMode string `json:"install_mode,omitempty"`
 	// Java 是上次成功启动时使用的 Java 可执行文件绝对路径。
 	// 只绑定路径，Java 运行时本体仍存放在全局缓存中供各实例共享。
 	// 下次 run 会优先复用；文件被手动删除时视为失效并重新自动匹配。
@@ -143,6 +149,19 @@ func Save(dir string, cfg Config) error {
 	return nil
 }
 
+// SetLoaderInfo 保留实例现有配置（内存、账号、参数等），只更新加载器与安装方式。
+// 配置缺失或损坏时回落到默认配置，行为与安装流程一致。
+func SetLoaderInfo(dir, loaderType, loaderVersion, installMode string) error {
+	cfg, err := Load(dir)
+	if err != nil {
+		cfg = Default()
+	}
+	cfg.LoaderType = loaderType
+	cfg.LoaderVersion = loaderVersion
+	cfg.InstallMode = installMode
+	return Save(dir, cfg)
+}
+
 // Format 返回便于打印的缩进 JSON，供 mtl config show 与 run --debug 使用。
 func Format(cfg Config) string {
 	if norm, err := normalize(cfg); err == nil {
@@ -188,6 +207,7 @@ func normalize(cfg Config) (Config, error) {
 	cfg.DefaultAccount = strings.TrimSpace(cfg.DefaultAccount)
 	cfg.LoaderType = strings.ToLower(strings.TrimSpace(cfg.LoaderType))
 	cfg.LoaderVersion = strings.TrimSpace(cfg.LoaderVersion)
+	cfg.InstallMode = strings.ToLower(strings.TrimSpace(cfg.InstallMode))
 	cfg.Java = strings.TrimSpace(cfg.Java)
 	if err := ValidateDefaultAccount(cfg.DefaultAccount); err != nil {
 		return Default(), err

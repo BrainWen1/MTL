@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"mtl/internal/config"
+	"mtl/internal/downloader"
 	"mtl/internal/fabric"
 	"mtl/internal/mrpack"
 )
@@ -193,7 +194,8 @@ func TestInstallDownloadsAndExtractsOverrides(t *testing.T) {
 	instance := filepath.Join(t.TempDir(), "inst")
 
 	var out bytes.Buffer
-	if err := installPack(pack, instance, installOptions{concurrency: 2, skipLoader: true}, &out); err != nil {
+	opts := installOptions{concurrency: 2, skipLoader: true, download: downloadSettings{LogMode: downloader.LogVerbose}}
+	if err := installPack(pack, instance, opts, &out); err != nil {
 		t.Fatalf("installPack: %v", err)
 	}
 
@@ -225,16 +227,50 @@ func TestInstallDownloadsAndExtractsOverrides(t *testing.T) {
 	}
 }
 
+func TestInstallDownloadLogModes(t *testing.T) {
+	bodies := map[string]string{"/a": "AAA", "/b": "BBB", "/c": "CCC", "/d": "DDD"}
+	srv, _ := serveBodies(t, bodies)
+	pack := buildPack(t, testIndex(srv.URL), nil)
+
+	var summary bytes.Buffer
+	if err := installPack(pack, filepath.Join(t.TempDir(), "inst"), installOptions{skipLoader: true}, &summary); err != nil {
+		t.Fatalf("installPack summary: %v", err)
+	}
+	out := summary.String()
+	if strings.Contains(out, "[1/") {
+		t.Fatalf("summary 模式不应逐个打印文件:\n%s", out)
+	}
+	if !strings.Contains(out, "[Download] 下载进度：") {
+		t.Fatalf("summary 模式缺少批次进度:\n%s", out)
+	}
+
+	var verbose bytes.Buffer
+	if err := installPack(pack, filepath.Join(t.TempDir(), "inst"), installOptions{
+		skipLoader: true,
+		download:   downloadSettings{LogMode: downloader.LogVerbose},
+	}, &verbose); err != nil {
+		t.Fatalf("installPack verbose: %v", err)
+	}
+	vout := verbose.String()
+	if !strings.Contains(vout, "[1/") {
+		t.Fatalf("verbose 模式缺少逐文件进度:\n%s", vout)
+	}
+	if strings.Contains(vout, "[Download] 下载进度：") {
+		t.Fatalf("verbose 模式不应输出批量汇总:\n%s", vout)
+	}
+}
+
 func TestInstallSkipsExistingFiles(t *testing.T) {
 	srv, hits := serveBodies(t, map[string]string{"/a": "AAA", "/b": "BBB"})
 	pack := buildPack(t, testIndex(srv.URL), nil)
 	instance := filepath.Join(t.TempDir(), "inst")
 
-	if err := installPack(pack, instance, installOptions{skipLoader: true}, io.Discard); err != nil {
+	verbose := downloadSettings{LogMode: downloader.LogVerbose}
+	if err := installPack(pack, instance, installOptions{skipLoader: true, download: verbose}, io.Discard); err != nil {
 		t.Fatalf("首次安装: %v", err)
 	}
 	var out bytes.Buffer
-	if err := installPack(pack, instance, installOptions{skipLoader: true}, &out); err != nil {
+	if err := installPack(pack, instance, installOptions{skipLoader: true, download: verbose}, &out); err != nil {
 		t.Fatalf("重复安装: %v", err)
 	}
 
@@ -315,10 +351,13 @@ func TestInstallFabricLoader(t *testing.T) {
 	instance := filepath.Join(t.TempDir(), "inst")
 
 	var out bytes.Buffer
-	err := installPack(pack, instance, installOptions{fabric: fabric.Options{
-		MetaBaseURL:       srv.URL,
-		MojangManifestURL: srv.URL + "/manifest.json",
-	}}, &out)
+	err := installPack(pack, instance, installOptions{
+		download: downloadSettings{LogMode: downloader.LogVerbose},
+		fabric: fabric.Options{
+			MetaBaseURL:       srv.URL,
+			MojangManifestURL: srv.URL + "/manifest.json",
+		},
+	}, &out)
 	if err != nil {
 		t.Fatalf("installPack: %v", err)
 	}
@@ -587,6 +626,37 @@ func TestInstallDifferentPackSkipsPrune(t *testing.T) {
 	assertFile(t, filepath.Join(instance, "mods", "b-new.jar"), "B-NEW")
 	if !strings.Contains(out.String(), "整合包标识由 \"Pack A\" 变为 \"Pack B\"，跳过清理") {
 		t.Fatalf("缺少不同整合包跳过清理的提示:\n%s", out.String())
+	}
+}
+
+func TestInstallRejectsConflictingModes(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"mrpack with mc", []string{"--mc", "1.20.1", "pack.mrpack"}, "不能同时使用"},
+		{"mrpack with loader", []string{"--loader", "fabric", "pack.mrpack"}, "不能同时使用"},
+		{"mrpack with loader version", []string{"--loader-version", "0.15.11", "pack.mrpack"}, "不能同时使用"},
+		{"template without mc", nil, "必须用 --mc"},
+		{"loader without version", []string{"--mc", "1.20.1", "--loader", "fabric"}, "必须同时指定 --loader-version"},
+		{"version without loader", []string{"--mc", "1.20.1", "--loader-version", "0.15.11"}, "--loader-version 必须与 --loader"},
+		{"template with skip-loader", []string{"--mc", "1.20.1", "--skip-loader"}, "--skip-loader 仅适用于 mrpack"},
+		{"template with no-prune", []string{"--mc", "1.20.1", "--no-prune"}, "--no-prune 仅适用于 mrpack"},
+		{"too many positional", []string{"a.mrpack", "b.mrpack"}, "用法:"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			args := append([]string{"--dir", t.TempDir()}, tt.args...)
+			err := install(args)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, want contains %q", err, tt.want)
+			}
+		})
+	}
+
+	if err := install(nil); err == nil || !strings.Contains(err.Error(), "--dir") {
+		t.Fatalf("缺少 --dir 应报错，得到 %v", err)
 	}
 }
 

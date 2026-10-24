@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -14,7 +13,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"time"
 
 	"mtl/internal/downloader"
 	"mtl/internal/mrpack"
@@ -25,7 +23,6 @@ const (
 	maxSidecarBytes  = 4096
 	maxOutputBytes   = 256 << 10
 	defaultRetries   = 3
-	maxRetryDelay    = 30 * time.Second
 )
 
 // DefaultCacheDir 返回 Forge installer 的全局缓存目录。
@@ -103,7 +100,9 @@ func (l *Loader) ensureInstaller(ctx context.Context, fullVersion string) (strin
 		Concurrency: 1,
 		Retries:     l.retries(),
 		RetryDelay:  l.opts.RetryDelay,
+		Timeout:     l.opts.Timeout,
 		HTTPClient:  l.opts.HTTPClient,
+		Mirrors:     l.opts.Mirrors,
 	})
 	if err != nil {
 		return "", false, fmt.Errorf("下载 Forge installer 失败: %w", err)
@@ -186,56 +185,20 @@ func outputTail(output string) string {
 	return "\ninstaller 输出（末尾）:\n" + output
 }
 
-// getBytes 拉取无独立清单的元数据（如 .sha1 sidecar），带指数退避重试。
+// getBytes 拉取无独立清单的元数据（如 .sha1 sidecar），复用公共下载层的
+// 镜像回退与重试。
 func (l *Loader) getBytes(ctx context.Context, rawURL string, limit int64) ([]byte, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return nil, fmt.Errorf("非法下载地址 %q", rawURL)
 	}
-	var lastErr error
-	retries := l.retries()
-	for attempt := 0; attempt <= retries; attempt++ {
-		if attempt > 0 {
-			if err := sleepCtx(ctx, retryDelay(l.opts.RetryDelay, attempt-1)); err != nil {
-				return nil, err
-			}
-		}
-		data, err := httpGetBytes(ctx, l.httpClient(), rawURL, limit)
-		if err == nil {
-			return data, nil
-		}
-		lastErr = err
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-	}
-	return nil, fmt.Errorf("请求失败（共尝试 %d 次）: %w", retries+1, lastErr)
-}
-
-func httpGetBytes(ctx context.Context, client *http.Client, rawURL string, limit int64) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
-	}
-	if resp.ContentLength > limit {
-		return nil, fmt.Errorf("响应超过上限 %d 字节", limit)
-	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > limit {
-		return nil, fmt.Errorf("响应超过上限 %d 字节", limit)
-	}
-	return data, nil
+	return downloader.GetBytes(ctx, rawURL, limit, downloader.RequestOptions{
+		HTTPClient: l.httpClient(),
+		Retries:    l.retries(),
+		RetryDelay: l.opts.RetryDelay,
+		Timeout:    l.opts.Timeout,
+		Mirrors:    l.opts.Mirrors,
+	})
 }
 
 func (l *Loader) httpClient() *http.Client {
@@ -253,30 +216,5 @@ func (l *Loader) retries() int {
 		return 0
 	default:
 		return l.opts.Retries
-	}
-}
-
-func retryDelay(base time.Duration, attempt int) time.Duration {
-	if base <= 0 {
-		base = 500 * time.Millisecond
-	}
-	d := base
-	for i := 0; i < attempt && d < maxRetryDelay; i++ {
-		d *= 2
-	}
-	if d > maxRetryDelay {
-		d = maxRetryDelay
-	}
-	return d
-}
-
-func sleepCtx(ctx context.Context, d time.Duration) error {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.C:
-		return nil
 	}
 }

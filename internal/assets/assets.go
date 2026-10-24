@@ -48,6 +48,12 @@ type Options struct {
 	RetryDelay time.Duration
 	// HTTPClient 为空时使用 http.DefaultClient。
 	HTTPClient *http.Client
+	// Timeout 是单文件下载超时；<=0 表示不限制。
+	Timeout time.Duration
+	// Mirrors 是镜像源配置，空值使用官方资源地址。
+	Mirrors downloader.Mirrors
+	// LogMode 控制资源下载日志粒度；默认 summary。
+	LogMode downloader.LogMode
 	// ObjectsBaseURL 为空时使用官方资源 CDN。
 	ObjectsBaseURL string
 	// Progress 接收进度消息（不含 "[Assets]" 前缀），调用已串行化。
@@ -144,7 +150,9 @@ func Ensure(ctx context.Context, spec IndexSpec, opts Options) error {
 		Concurrency: 1,
 		Retries:     opts.Retries,
 		RetryDelay:  opts.RetryDelay,
+		Timeout:     opts.Timeout,
 		HTTPClient:  opts.HTTPClient,
+		Mirrors:     opts.Mirrors,
 	})
 	if err != nil {
 		return friendly(fmt.Sprintf("下载 assetIndex %s 失败", spec.ID), err)
@@ -168,20 +176,52 @@ func Ensure(ctx context.Context, spec IndexSpec, opts Options) error {
 		return nil
 	}
 
+	verbose := opts.LogMode == downloader.LogVerbose
+	lastPct := -10
 	_, err = downloader.Download(ctx, dir, files, downloader.Options{
 		Concurrency: opts.Concurrency,
 		Retries:     opts.Retries,
 		RetryDelay:  opts.RetryDelay,
+		Timeout:     opts.Timeout,
 		HTTPClient:  opts.HTTPClient,
+		Mirrors:     opts.Mirrors,
 		OnStart: func(res downloader.Result) {
-			logf("开始下载资源：%s", pathToKey[res.File.Path])
+			if verbose {
+				logf("开始下载资源：%s", pathToKey[res.File.Path])
+			}
 		},
 		Progress: func(done, total int, res downloader.Result) {
+			if !verbose {
+				return
+			}
 			if res.Skipped {
 				logf("已存在，跳过：%s", pathToKey[res.File.Path])
 				return
 			}
 			logf("资源下载完成，校验通过")
+		},
+		// summary 模式只输出批次进度，避免上千个 asset 逐个刷屏。
+		BatchProgress: func(done, total, failed int) {
+			if verbose {
+				return
+			}
+			pct := done * 100 / total
+			if pct < lastPct+10 && done != total {
+				return
+			}
+			lastPct = pct
+			if failed > 0 {
+				logf("资源下载进度：%d/%d（%d%%，失败 %d）", done, total, pct, failed)
+				return
+			}
+			logf("资源下载进度：%d/%d（%d%%）", done, total, pct)
+		},
+		// 资源通常很小；若出现大对象，保留下载百分比。
+		FileProgress: func(path string, written, total int64) {
+			if total <= 0 {
+				return
+			}
+			logf("资源下载：%s（%d/%d，%d%%）", pathToKey[path], written, total, written*100/total)
 		},
 	})
 	if err != nil {

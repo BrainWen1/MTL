@@ -61,8 +61,12 @@ type Options struct {
 	Retries int
 	// RetryDelay 是首次重试前的等待时间，按指数退避，<=0 时默认 500ms。
 	RetryDelay time.Duration
+	// Timeout 是单文件下载超时；<=0 表示不限制。
+	Timeout time.Duration
 	// HTTPClient 为空时使用 http.DefaultClient。
 	HTTPClient *http.Client
+	// Mirrors 是镜像源配置；空值使用 Mojang 官方地址。
+	Mirrors downloader.Mirrors
 	// Progress 接收进度消息（不含 "[Runtime]" 前缀），调用已串行化。
 	Progress func(string)
 }
@@ -75,7 +79,9 @@ type options struct {
 	concurrency int
 	retries     int
 	retryDelay  time.Duration
+	timeout     time.Duration
 	httpClient  *http.Client
+	mirrors     downloader.Mirrors
 	progress    func(string)
 }
 
@@ -88,7 +94,9 @@ func (o Options) normalize() options {
 		concurrency: o.Concurrency,
 		retries:     o.Retries,
 		retryDelay:  o.RetryDelay,
+		timeout:     o.Timeout,
 		httpClient:  o.HTTPClient,
+		mirrors:     o.Mirrors,
 		progress:    o.Progress,
 	}
 	if n.targetOS == "" {
@@ -389,7 +397,9 @@ func (o options) loadManifest(ctx context.Context, dir, rel string, art metaArti
 		Concurrency: 1,
 		Retries:     o.retries,
 		RetryDelay:  o.retryDelay,
+		Timeout:     o.timeout,
 		HTTPClient:  o.httpClient,
+		Mirrors:     o.mirrors,
 	})
 	if err != nil {
 		return nil, friendly("下载 Java 运行时清单失败", err)
@@ -568,18 +578,20 @@ func (p *plan) verify(root string) error {
 }
 
 // install 先在 staging 目录完整下载并校验，最后原子替换正式目录。
+// staging 使用固定路径，失败或 Ctrl+C 后再次执行可复用其中的 *.tmp 实现续传。
 func (p *plan) install(ctx context.Context, root, component, platform, finalDir, manifestSHA1, version string, o options, logf func(string, ...any)) (string, error) {
-	staging, err := os.MkdirTemp(root, ".staging-"+component+"-")
-	if err != nil {
+	staging := filepath.Join(root, ".staging-"+component+"-"+platform)
+	if info, err := os.Lstat(staging); err == nil {
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("Java 运行时临时目录 %q 不是普通目录", staging)
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return "", friendly("检查 Java 运行时临时目录失败", err)
+	}
+	if err := os.MkdirAll(staging, 0o755); err != nil {
 		return "", friendly("创建 Java 运行时临时目录失败", err)
 	}
 	_ = os.Chmod(staging, 0o755)
-	committed := false
-	defer func() {
-		if !committed {
-			_ = os.RemoveAll(staging)
-		}
-	}()
 
 	for _, rel := range p.dirs {
 		target, err := mrpack.SafeJoin(staging, rel)
@@ -598,13 +610,22 @@ func (p *plan) install(ctx context.Context, root, component, platform, finalDir,
 			Concurrency: o.concurrency,
 			Retries:     o.retries,
 			RetryDelay:  o.retryDelay,
+			Timeout:     o.timeout,
 			HTTPClient:  o.httpClient,
+			Mirrors:     o.mirrors,
 			Progress: func(done, total int, _ downloader.Result) {
 				pct := done * 100 / total
 				if pct >= lastPct+10 || done == total {
 					lastPct = pct
 					logf("下载 Java 运行时文件：%d/%d（%d%%）", done, total, pct)
 				}
+			},
+			FileProgress: func(filePath string, written, total int64) {
+				if total <= 0 {
+					return
+				}
+				logf("下载 Java 运行时文件：%s（%d/%d，%d%%）",
+					path.Base(filePath), written, total, written*100/total)
 			},
 		})
 		if err != nil {
@@ -631,6 +652,12 @@ func (p *plan) install(ctx context.Context, root, component, platform, finalDir,
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return "", friendly(fmt.Sprintf("创建链接目录 %q 失败", l.rel), err)
 		}
+		// 固定 staging 可能保留上次失败时创建的链接，先移除再重建。
+		if _, statErr := os.Lstat(target); statErr == nil {
+			if err := os.Remove(target); err != nil {
+				return "", friendly(fmt.Sprintf("清理旧链接 %q 失败", l.rel), err)
+			}
+		}
 		if err := os.Symlink(l.target, target); err != nil {
 			// Windows 创建符号链接通常需要额外权限；官方 Windows 清单不含 link，
 			// 这里仅作为其他平台清单的兜底。
@@ -655,7 +682,6 @@ func (p *plan) install(ctx context.Context, root, component, platform, finalDir,
 	if err := swapDir(staging, finalDir); err != nil {
 		return "", err
 	}
-	committed = true
 	_ = os.Chmod(finalDir, 0o755)
 
 	javaPath, err := mrpack.SafeJoin(finalDir, p.javaRel)
@@ -816,71 +842,14 @@ func (o options) getBytes(ctx context.Context, rawURL string, limit int64) ([]by
 	if err := validateHTTPURL(rawURL); err != nil {
 		return nil, err
 	}
-	var lastErr error
-	for attempt := 0; attempt <= o.retries; attempt++ {
-		if attempt > 0 {
-			if err := sleepCtx(ctx, retryDelay(o.retryDelay, attempt-1)); err != nil {
-				return nil, err
-			}
-		}
-		data, err := httpGetBytes(ctx, o.httpClient, rawURL, limit)
-		if err == nil {
-			return data, nil
-		}
-		lastErr = err
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-	}
-	return nil, fmt.Errorf("请求失败（共尝试 %d 次）: %w", o.retries+1, lastErr)
-}
-
-func httpGetBytes(ctx context.Context, client *http.Client, rawURL string, limit int64) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
-	}
-	if resp.ContentLength > limit {
-		return nil, fmt.Errorf("响应超过上限 %d 字节", limit)
-	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > limit {
-		return nil, fmt.Errorf("响应超过上限 %d 字节", limit)
-	}
-	return data, nil
-}
-
-func retryDelay(base time.Duration, attempt int) time.Duration {
-	d := base
-	for i := 0; i < attempt && d < maxRetryDelay; i++ {
-		d *= 2
-	}
-	if d > maxRetryDelay {
-		d = maxRetryDelay
-	}
-	return d
-}
-
-func sleepCtx(ctx context.Context, d time.Duration) error {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.C:
-		return nil
-	}
+	// RequestOptions.Retries 使用精确语义：o.retries 已完成归一化。
+	return downloader.GetBytes(ctx, rawURL, limit, downloader.RequestOptions{
+		HTTPClient: o.httpClient,
+		Retries:    o.retries,
+		RetryDelay: o.retryDelay,
+		Timeout:    o.timeout,
+		Mirrors:    o.mirrors,
+	})
 }
 
 // friendly 补充权限/磁盘空间的可读提示。

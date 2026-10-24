@@ -17,6 +17,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"mtl/internal/downloader"
 )
 
 func sha1Hex(s string) string {
@@ -110,6 +112,7 @@ func (m *mockFabric) options() Options {
 		MojangManifestURL: m.srv.URL + "/manifest.json",
 		Concurrency:       2,
 		RetryDelay:        time.Millisecond,
+		LogMode:           downloader.LogVerbose,
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"mtl/internal/downloader"
 	"mtl/internal/mrpack"
 )
 
@@ -37,8 +38,14 @@ type Options struct {
 	Retries int
 	// RetryDelay 是首次重试前的等待时间，按指数退避，<=0 时默认 500ms。
 	RetryDelay time.Duration
+	// Timeout 是单文件下载超时；<=0 表示不限制。
+	Timeout time.Duration
 	// HTTPClient 为空时使用 http.DefaultClient，调用方应通过 ctx 控制超时。
 	HTTPClient *http.Client
+	// Mirrors 是镜像源配置；空值使用官方端点。
+	Mirrors downloader.Mirrors
+	// LogMode 控制下载日志粒度；默认 summary。
+	LogMode downloader.LogMode
 	// TargetOS / TargetArch 用于跨平台打包，空值使用本机 runtime.GOOS/GOARCH。
 	// 值采用 Go 的 GOOS/GOARCH 命名（darwin 表示 macOS）。
 	TargetOS   string
@@ -76,6 +83,9 @@ func (o Options) normalize() options {
 		concurrency: o.Concurrency,
 		retries:     o.Retries,
 		retryDelay:  o.RetryDelay,
+		timeout:     o.Timeout,
+		mirrors:     o.Mirrors,
+		logMode:     o.LogMode,
 		targetOS:    o.TargetOS,
 		targetArch:  o.TargetArch,
 	}

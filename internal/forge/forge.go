@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"mtl/internal/config"
+	"mtl/internal/downloader"
 	"mtl/internal/fabric"
 	"mtl/internal/runtime"
 )
@@ -35,8 +36,14 @@ type Options struct {
 	Retries int
 	// RetryDelay 是首次重试前的等待时间，按指数退避。
 	RetryDelay time.Duration
+	// Timeout 是单文件下载超时；<=0 表示不限制。
+	Timeout time.Duration
 	// HTTPClient 为空时使用 http.DefaultClient。
 	HTTPClient *http.Client
+	// Mirrors 是镜像源配置；空值使用官方地址。
+	Mirrors downloader.Mirrors
+	// LogMode 控制下载日志粒度；默认 summary。
+	LogMode downloader.LogMode
 	// TargetOS / TargetArch 用于跨平台准备原版文件，采用 Go 命名。
 	TargetOS   string
 	TargetArch string
@@ -196,7 +203,10 @@ func (l *Loader) fabricOptions() fabric.Options {
 		Concurrency:       l.opts.Concurrency,
 		Retries:           l.opts.Retries,
 		RetryDelay:        l.opts.RetryDelay,
+		Timeout:           l.opts.Timeout,
 		HTTPClient:        l.opts.HTTPClient,
+		Mirrors:           l.opts.Mirrors,
+		LogMode:           l.opts.LogMode,
 		TargetOS:          l.opts.TargetOS,
 		TargetArch:        l.opts.TargetArch,
 		Progress:          l.opts.Progress,
@@ -219,7 +229,9 @@ func (l *Loader) ensureJava(ctx context.Context, vanilla fabric.VanillaResult, m
 		Concurrency: l.opts.Concurrency,
 		Retries:     l.opts.Retries,
 		RetryDelay:  l.opts.RetryDelay,
+		Timeout:     l.opts.Timeout,
 		HTTPClient:  l.opts.HTTPClient,
+		Mirrors:     l.opts.Mirrors,
 		Progress:    l.opts.Progress,
 	})
 	if err != nil {
