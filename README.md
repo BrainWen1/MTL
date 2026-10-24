@@ -7,6 +7,7 @@ MTL 是自用项目，不是成熟的发行版启动器。功能按实际需要�
 ## ✨ 已实现功能
 
 - **mrpack 整合包安装**：解析 `modrinth.index.json`，下载客户端文件、解压 overrides，并自动安装对应版本的 Fabric 或 Forge loader（Forge 需 Minecraft 1.20.1+）。
+- **mrpack 增量更新**：通过 `.mtl/pack-lock.json` 记录托管文件与 sha256；重复安装时只下载变更文件，并清理新版整合包不再包含的旧托管文件。`saves/`、用户手动新增或修改的文件不会被清理，可用 `--no-prune` 完全关闭清理。
 - **加载器抽象**：`internal/loader` 统一 Fabric / Forge 的安装与启动接口；安装时把 `loader_type`、`loader_version` 写入实例配置，旧实例按 profile id 自动识别。
 - **Forge 安装**：下载并校验官方 installer 到全局缓存，准备原版文件与 `launcher_profiles.json`，以非 GUI 方式执行 installer；已安装的 profile 和 installer 缓存会复用。
 - **哈希校验与自动跳过**：下载前校验已有文件的 sha1 / sha512，哈希一致的直接跳过；重复执行安装不会重复下载。
@@ -28,7 +29,8 @@ MTL 是自用项目，不是成熟的发行版启动器。功能按实际需要�
 - 仅有离线账号体系，不接入微软正版登录；启动参数中的 access token 固定为 `0`，用户类型为 `legacy`。
 - 高性能显卡调度仅 Windows 生效，其他平台静默跳过。
 - 崩溃诊断是**静态关键词匹配**，只能覆盖常见模式；复杂崩溃、混淆堆栈或非 Mod 问题仍需人工查看原始日志。
-- 重新安装 mrpack 不会删除“新包中已移除”的旧文件，需要手动清理。
+- 增量清理只识别 `mtl install` 写入 `.mtl/pack-lock.json` 的托管文件；旧实例首次重新安装不会清理历史文件，只会从本次安装开始建立锁定清单。
+- 清理前会校验文件哈希，用户修改过的旧托管文件会保留；`saves/` 与 `.mtl/` 永远不参与清理。
 - 没有图形界面、皮肤/披风、Mod 管理、自动更新等启动器周边功能。
 - Linux arm64 没有 Mojang 官方 Java 运行时，需要 `--java` 指定本机 Java。
 
@@ -103,7 +105,7 @@ CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -o mtl     ./cmd/mtl
 安装 mrpack 整合包到实例目录。
 
 ```bash
-mtl install --dir <实例目录> [--concurrency N] [--skip-loader] <pack.mrpack>
+mtl install --dir <实例目录> [--concurrency N] [--skip-loader] [--no-prune] <pack.mrpack>
 ```
 
 | 参数 | 必填 | 说明 |
@@ -111,6 +113,7 @@ mtl install --dir <实例目录> [--concurrency N] [--skip-loader] <pack.mrpack>
 | `--dir <目录>` | 是 | 实例目录，不存在时自动创建 |
 | `--concurrency N` | 否 | 并发下载数，缺省为 4 |
 | `--skip-loader` | 否 | 只下载整合包文件，不安装 Fabric / Forge loader |
+| `--no-prune` | 否 | 增量更新时只更新文件，不删除旧版整合包遗留的托管文件 |
 | `<pack.mrpack>` | 是 | mrpack 文件路径 |
 
 示例：
@@ -124,6 +127,14 @@ mtl install --dir <实例目录> [--concurrency N] [--skip-loader] <pack.mrpack>
 - Fabric 与 Forge 的选择完全由 mrpack 的 `dependencies` 决定。
 - Forge 仅支持 Minecraft 1.20.1+；Forge 版本可写完整形式 `1.20.1-47.4.3`，也可只写 `47.4.3`。
 - 重复安装会复用已校验的文件、已安装的 Forge profile 与 installer 缓存，不会重复执行 installer。
+
+增量更新说明：
+
+- 安装完成后写入 `.mtl/pack-lock.json`，记录整合包名称/版本、来源路径，以及所有由 mrpack 自动下载或解压的托管文件（相对路径 + `sha256-` 哈希）。
+- 再次安装同一个整合包时，会对比新旧锁定清单并输出“新增 / 更新 / 待删除”摘要；新版不再声明的旧托管文件会先打印列表再删除。
+- 只有「旧锁定清单记录、新版 mrpack 不再声明、且当前哈希仍与旧锁定一致」的文件才会删除。`saves/`、`.mtl/` 永远不清理；用户手动新增的文件不在清单中，用户修改过的旧托管文件会保留。
+- 第一次安装、旧实例没有 `pack-lock.json`、或整合包标识（`name`）发生变化时，只安装并生成新清单，不做清理，避免跨整合包误删。
+- `--no-prune` 用于兜底：本次只更新文件、保留全部旧托管文件。被保留的文件不会继续写入新清单，之后的普通安装也不会再自动清理它们。
 
 ### mtl run
 
@@ -247,6 +258,7 @@ mtl info <实例名> [--dir <实例根目录>]
 
 - 只读操作，不修改任何配置文件，也不启动游戏。
 - Java 检查只校验文件是否存在、是否为可执行文件，不会执行 `java -version`。
+- 元信息会展示整合包版本、`.mtl/pack-lock.json` 是否存在及托管文件数量、整合包来源；锁定清单损坏时显示读取失败，不影响其他检查。
 
 ### mtl account
 
@@ -354,7 +366,8 @@ mtl config reset --dir <实例目录>
 instances/
 └── demo/
     ├── .mtl/
-    │   └── config.json          # MTL 实例配置
+    │   ├── config.json          # MTL 实例配置
+    │   └── pack-lock.json       # 整合包托管文件锁定清单（仅 mrpack 实例）
     ├── crash_reports/           # MTL 归档的崩溃日志（下划线）
     ├── crash-reports/           # Minecraft 原版生成的崩溃日志（连字符，崩溃后出现）
     ├── mods/                    # 整合包 mod
@@ -467,7 +480,7 @@ Linux / macOS：`~/.cache/mtl/` 下为相同结构。
 
 模块名为 `mtl`，入口在 `cmd/mtl`。主要包职责：
 
-- `internal/mrpack`：mrpack 解析、路径安全（`SafeJoin` / `ValidateRelPath`）、overrides 解压
+- `internal/mrpack`：mrpack 解析、路径安全（`SafeJoin` / `ValidateRelPath`）、overrides 解压、pack-lock 锁定清单与增量清理
 - `internal/downloader`：并发下载、哈希校验、失败重试
 - `internal/loader`：加载器统一抽象与按类型构造（Fabric / Forge，NeoForge 预留）
 - `internal/fabric`：Fabric loader 安装、原版版本文件准备
@@ -503,10 +516,11 @@ go test ./...
 
 ### P0 — 下一阶段优先完成
 
-1. **mrpack 增量更新与残留清理**
-   - 安装后记录清单（`.mtl/pack-lock.json`：包版本、托管文件路径与哈希）。
-   - 再次 `install` 时按新旧 index 对比：只下载变更文件，删除新包中已移除的托管文件。
-   - 保护用户数据：`saves/`、手动新增的 mod、用户改过的配置不参与清理。
+1. ✅ **mrpack 增量更新与残留清理（已实现）**
+   - 安装后写入 `.mtl/pack-lock.json`：包标识、版本、来源、托管文件路径与 sha256。
+   - 再次 `install` 时对比新旧清单：只下载变更文件，删除新包中已移除的托管文件；清理前输出新增/更新/待删除摘要。
+   - 保护用户数据：`saves/`、`.mtl/`、手动新增的文件不参与清理；用户修改过的旧托管文件经哈希校验后保留。
+   - `--no-prune` 可完全关闭清理，只更新文件。
    - 验收：同一实例连续安装 v1 → v2 后 `mods/` 无 v1 残留，存档与手动文件保留。
 
 2. **不依赖整合包的原版 / 加载器安装**

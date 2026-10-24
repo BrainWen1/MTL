@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 
 	"mtl/internal/account"
@@ -62,7 +63,7 @@ func run(args []string) error {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "用法:")
-	fmt.Fprintln(os.Stderr, "  mtl install --dir <实例目录> [--concurrency N] [--skip-loader] <pack.mrpack>（支持 Fabric / Forge 1.20.1+）")
+	fmt.Fprintln(os.Stderr, "  mtl install --dir <实例目录> [--concurrency N] [--skip-loader] [--no-prune] <pack.mrpack>（支持 Fabric / Forge 1.20.1+）")
 	fmt.Fprintln(os.Stderr, "  mtl run --dir <实例目录> [--account <账号>] [--username <名字>] [--memory <内存>] [--memory-auto] [--highperf-gpu|--no-highperf-gpu] [--java <java路径>] [--jvm-arg <参数>]... [--game-arg <参数>]... [--debug]")
 	fmt.Fprintln(os.Stderr, "  mtl inspect [--extract <dir>] <pack.mrpack>")
 	fmt.Fprintln(os.Stderr, "  mtl list [--dir <实例根目录>]（默认 ./instances）")
@@ -86,21 +87,23 @@ func install(args []string) error {
 	dir := fs.String("dir", "", "实例目录（必填）")
 	concurrency := fs.Int("concurrency", 0, "并发下载数，0 表示使用默认值")
 	skipLoader := fs.Bool("skip-loader", false, "跳过加载器（Fabric/Forge）安装")
+	noPrune := fs.Bool("no-prune", false, "增量更新时不删除旧版整合包遗留的托管文件")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("用法: mtl install --dir <实例目录> [--concurrency N] [--skip-loader] <pack.mrpack>")
+		return fmt.Errorf("用法: mtl install --dir <实例目录> [--concurrency N] [--skip-loader] [--no-prune] <pack.mrpack>")
 	}
 	if *dir == "" {
 		return fmt.Errorf("必须用 --dir 指定实例目录")
 	}
-	return installPack(fs.Arg(0), *dir, installOptions{concurrency: *concurrency, skipLoader: *skipLoader}, os.Stdout)
+	return installPack(fs.Arg(0), *dir, installOptions{concurrency: *concurrency, skipLoader: *skipLoader, noPrune: *noPrune}, os.Stdout)
 }
 
 type installOptions struct {
 	concurrency int
 	skipLoader  bool
+	noPrune     bool
 	// fabric / forge 仅用于测试注入 mock 服务地址；零值使用官方端点。
 	fabric fabric.Options
 	forge  forge.Options
@@ -159,6 +162,9 @@ func installPack(packPath, dir string, opts installOptions, out io.Writer) error
 
 	if opts.skipLoader {
 		fmt.Fprintln(out, "已跳过加载器安装")
+		if err := updatePackLock(p, packPath, dir, opts.noPrune, out); err != nil {
+			return err
+		}
 		fmt.Fprintf(out, "实例安装完成: %s\n", dir)
 		return nil
 	}
@@ -191,7 +197,79 @@ func installPack(packPath, dir string, opts installOptions, out io.Writer) error
 	if err := recordLoaderInfo(dir, string(loaderType), loaderVersion, out); err != nil {
 		return err
 	}
+	if err := updatePackLock(p, packPath, dir, opts.noPrune, out); err != nil {
+		return err
+	}
 	fmt.Fprintf(out, "实例安装完成: %s\n", dir)
+	return nil
+}
+
+// updatePackLock 在整合包文件落盘后生成或更新 .mtl/pack-lock.json。
+// 只有同一整合包的旧清单才会触发增量清理；清理对象仅限旧清单记录、
+// 新版不再声明、且内容未被用户修改的托管文件。
+func updatePackLock(p *mrpack.Pack, packPath, dir string, noPrune bool, out io.Writer) error {
+	if out == nil {
+		out = io.Discard
+	}
+	desired, err := p.ManagedFiles(dir)
+	if err != nil {
+		return fmt.Errorf("生成整合包锁定清单失败: %w", err)
+	}
+
+	old, err := mrpack.LoadLock(dir)
+	if err != nil {
+		fmt.Fprintf(out, "[Pack] 警告: 旧锁定清单不可用，跳过清理并重新生成: %v\n", err)
+		old = nil
+	}
+	if old != nil && old.PackID != p.Index.Name {
+		fmt.Fprintf(out, "[Pack] 警告: 整合包标识由 %q 变为 %q，跳过清理，避免误删其他整合包文件\n", old.PackID, p.Index.Name)
+		old = nil
+	}
+
+	lock := &mrpack.Lock{
+		PackID:      p.Index.Name,
+		PackVersion: p.Index.VersionID,
+		Files:       desired,
+	}
+	if source, err := filepath.Abs(packPath); err == nil {
+		lock.Source = source
+	} else {
+		lock.Source = packPath
+	}
+
+	if old == nil {
+		fmt.Fprintln(out, "[Pack] 未找到可用的旧锁定清单，本次不做清理")
+	} else {
+		diff := mrpack.DiffFiles(old.Files, desired)
+		plan := mrpack.PlanPrune(dir, old, desired)
+		fmt.Fprintf(out, "[Pack] 增量检查: 新增 %d，更新 %d，待删除 %d\n",
+			len(diff.Added), len(diff.Updated), len(plan.Delete))
+		if len(plan.Delete) > 0 {
+			fmt.Fprintln(out, "[Pack] 待删除文件（旧版托管、新版不再包含）:")
+			for _, rel := range plan.Delete {
+				fmt.Fprintf(out, "[Pack]   - %s\n", rel)
+			}
+		}
+		for _, kept := range plan.Keep {
+			fmt.Fprintf(out, "[Pack] 保留 %s（%s）\n", kept.Path, kept.Reason)
+		}
+		if noPrune {
+			if len(plan.Delete) > 0 {
+				fmt.Fprintf(out, "[Pack] --no-prune 已开启，保留 %d 个旧托管文件（不再纳入锁定清单）\n", len(plan.Delete))
+			}
+		} else if len(plan.Delete) > 0 {
+			n, err := mrpack.ApplyPrune(dir, plan.Delete)
+			if err != nil {
+				return fmt.Errorf("清理旧托管文件失败: %w", err)
+			}
+			fmt.Fprintf(out, "[Pack] 已清理 %d 个旧托管文件\n", n)
+		}
+	}
+
+	if err := mrpack.SaveLock(dir, lock); err != nil {
+		return fmt.Errorf("写入整合包锁定清单失败: %w", err)
+	}
+	fmt.Fprintf(out, "[Pack] 已写入锁定清单: %s（%d 个托管文件）\n", mrpack.LockRelPath, len(desired))
 	return nil
 }
 
